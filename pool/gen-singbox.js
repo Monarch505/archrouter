@@ -73,14 +73,15 @@ async function main() {
   const addresses = ["172.16.0.2/32"];
   const cfg = {
     log: { level: "warning", output: path.join(dir, "sing-box.log") },
-    // DNS through the tunnel: WARP answers 1.1.1.1 inside the tunnel, so
-    // client hostnames (opencode.ai, api.ipify.org) resolve once the
-    // handshake completes. The route rule steers 1.1.1.1 via warp-ep (no
-    // detour field → avoids 1.14 "detour to an empty direct outbound"
-    // FATAL). Peer stays a literal IPv4 → handshake needs zero DNS.
-    // (No `address_resolver` needed: 1.1.1.1 is a literal IP.)
+    // DNS outside the tunnel (new 1.12+ format — legacy `address` form is
+    // REMOVED in 1.14 and FATALs `sing-box check`). Direct UDP to 1.1.1.1
+    // works even where the tunnel is down (proven chroot 2026-09-24), and
+    // the wg peer is a literal IPv4 so the handshake needs zero DNS. This
+    // breaks the chicken-and-egg: without it, sing-box can't resolve the
+    // health-probe hostname until the tunnel is up, and can't verify the
+    // tunnel until a probe resolves.
     dns: {
-      servers: [{ tag: "cf", address: "1.1.1.1" }],
+      servers: [{ type: "udp", tag: "cf", server: "1.1.1.1", detour: "direct" }],
       final: "cf",
     },
     inbounds: [{ type: "socks", tag: "socks-in", listen: "127.0.0.1", listen_port: port }],
