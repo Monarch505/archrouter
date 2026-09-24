@@ -73,17 +73,13 @@ async function main() {
   const addresses = ["172.16.0.2/32"];
   const cfg = {
     log: { level: "warning", output: path.join(dir, "sing-box.log") },
-    // DNS outside the tunnel (new 1.12+ format — legacy `address` form is
-    // REMOVED in 1.14 and FATALs `sing-box check`). Direct UDP to 1.1.1.1
-    // works even where the tunnel is down (proven chroot 2026-09-24), and
-    // the wg peer is a literal IPv4 so the handshake needs zero DNS. This
-    // breaks the chicken-and-egg: without it, sing-box can't resolve the
-    // health-probe hostname until the tunnel is up, and can't verify the
-    // tunnel until a probe resolves.
-    dns: {
-      servers: [{ type: "udp", tag: "cf", server: "1.1.1.1", detour: "direct" }],
-      final: "cf",
-    },
+    // NOTE: no `dns` block on purpose. sing-box 1.14 rejects any explicit
+    // dns server here — legacy `address` form is REMOVED (FATAL at check),
+    // and new-format with `detour: direct` FATALs at start ("detour to an
+    // empty direct outbound makes no sense"). The wg peer is a literal IPv4
+    // so the handshake needs zero DNS; client hostnames resolve via the
+    // system resolver (/etc/resolv.conf) once the tunnel is up, same as
+    // the proven WSL recipe (2026-09-22).
     inbounds: [{ type: "socks", tag: "socks-in", listen: "127.0.0.1", listen_port: port }],
     outbounds: [{ type: "direct", tag: "direct" }],
     endpoints: [{
