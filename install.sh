@@ -54,8 +54,8 @@ else
 fi
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64)  WGCF_ASSET="linux-amd64"; SB_ASSET="linux-amd64" ;;
-  aarch64) WGCF_ASSET="linux-arm64";  SB_ASSET="linux-arm64" ;;
+  x86_64)  WGCF_ASSET="linux_amd64"; SB_ASSET="linux-amd64" ;;
+  aarch64) WGCF_ASSET="linux_arm64";  SB_ASSET="linux-arm64" ;;
   *) die "unsupported arch: $ARCH (need x86_64/aarch64)" ;;
 esac
 # Termux quirk: wgcf ships NO android asset — linux static build runs fine;
@@ -135,16 +135,18 @@ fetch_bins() {
     done
     return 0
   fi
-  # wgcf (single static binary)
+  # wgcf (single static binary — curl -f so a 404 never lands as a "binary")
   if [ -x "$BINDIR/wgcf" ] && [ "$REINSTALL_BINS" -eq 0 ]; then
     ok "bin wgcf (cached)"
   else
     log "downloading wgcf v$WGCF_VER ($WGCF_ASSET) ..."
-    curl -sL --max-time 120 -o "$BINDIR/wgcf" \
+    curl -fsSL --max-time 120 -o "$BINDIR/wgcf" \
       "https://github.com/ViRb3/wgcf/releases/download/v$WGCF_VER/wgcf_${WGCF_VER}_${WGCF_ASSET}" \
-      || die "wgcf download failed"
+      || { rm -f "$BINDIR/wgcf"; die "wgcf download failed (check asset name for $ARCH)"; }
     chmod +x "$BINDIR/wgcf"
   fi
+  [ "$(wc -c <"$BINDIR/wgcf")" -gt 100000 ] \
+    || { rm -f "$BINDIR/wgcf"; die "wgcf too small — bad download, re-run with --reinstall-bins"; }
   "$BINDIR/wgcf" --help >/dev/null 2>&1 || die "wgcf failed to run (wrong arch?)"
   ok "bin wgcf v$WGCF_VER"
   # sing-box (tarball, binary inside versioned dir)
