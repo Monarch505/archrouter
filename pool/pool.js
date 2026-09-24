@@ -13,6 +13,12 @@
  *   [--reset-hook "archrouter warp-reset %ID%"] [--health-url URL]
  *   [--health-interval 30] [--health-fail-thr 3] [--min-reset-gap 30]
  *   [--verify-timeout 5] [--hook-timeout 120] [--auto-reset 1]
+ *   [--quarantine-secs 300]
+ *
+ * 429/403 rotation: the router POSTs /api/report on usage-limit. The pool
+ * quarantines the backend that last served opencode.ai (excluded from RR
+ * for quarantine-secs) and resets it in background — traffic fails over
+ * to the healthy backend while the burned one re-handshakes for a new IP.
  *
  * Always-on: when no warp backend is healthy (or all dials fail), the pool
  * serves via direct TCP egress and counts it in totals.direct_fallback.
@@ -127,14 +133,19 @@ const VERIFY_TIMEOUT = Number(args["verify-timeout"] || 5) * 1000;
 const HOOK_TIMEOUT = Number(args["hook-timeout"] || 120) * 1000;
 const RESET_HOOK = args["reset-hook"] || "archrouter warp-reset %ID%";
 const AUTO_RESET = String(args["auto-reset"] ?? "1") !== "0";
+const QUARANTINE_SECS = Number(args["quarantine-secs"] || 300);
 
 const backendDefs = args.backends.length ? args.backends : ["a=127.0.0.1:11810", "b=127.0.0.1:11811"];
 const backends = backendDefs.map((d) => {
   const eq = d.indexOf("=");
   const id = d.slice(0, eq);
   const hp = splitHostPort(d.slice(eq + 1), 1080);
-  return { id, host: hp.host, port: hp.port, consecFails: 0, lastOk: 0, lastIp: null, lastReset: 0, rr: true };
+  return { id, host: hp.host, port: hp.port, consecFails: 0, lastOk: 0, lastIp: null, lastReset: 0, quarantineUntil: 0, rr: true };
 });
+
+// host -> backend id that last served it (used to map 429/403 limit reports
+// to the backend whose IP actually got burned).
+const lastServe = {};
 
 const totals = { total_resets: 0, success_count: 0, same_ip_count: 0, direct_fallback: 0 };
 const events = [];
@@ -145,10 +156,21 @@ function event(type, instance, msg) {
 }
 
 let rrIndex = 0;
+function isQuarantined(b, now = Date.now()) {
+  return b.quarantineUntil > now;
+}
 function pickBackend() {
-  const healthy = backends.filter((b) => b.consecFails < HEALTH_FAIL_THR);
-  const pool = healthy.length ? healthy : backends;
-  const b = pool[rrIndex % pool.length];
+  const now = Date.now();
+  const fresh = backends.filter((b) => b.consecFails < HEALTH_FAIL_THR && !isQuarantined(b, now));
+  if (fresh.length) {
+    const b = fresh[rrIndex % fresh.length];
+    rrIndex += 1;
+    return b;
+  }
+  // All fresh backends quarantined/down: prefer the one whose quarantine
+  // expires soonest (least-burned), else plain round-robin.
+  const byQuarantine = [...backends].sort((x, y) => x.quarantineUntil - y.quarantineUntil);
+  const b = byQuarantine[rrIndex % byQuarantine.length];
   rrIndex += 1;
   return b;
 }
@@ -198,6 +220,7 @@ async function relay(client, host, port) {
     try {
       const up = await socks5Connect(b.host, b.port, host, port);
       b.consecFails = 0; b.lastOk = Date.now();
+      lastServe[host] = b.id;
       event("serve", b.id, `${host}:${port}`);
       client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
       client.pipe(up); up.pipe(client);
@@ -321,6 +344,7 @@ async function coordinatorReset(id, source) {
     if (v.ok) {
       totals.success_count += 1;
       if (v.sameIp) totals.same_ip_count += 1;
+      else b.quarantineUntil = 0; // fresh IP → burned flag no longer applies
       event("reset", id, `DONE source=${source} → IP: ${v.ip}${v.sameIp ? " (same)" : ""}`);
       return { code: 200, msg: `reset done → ${v.ip}` };
     }
@@ -331,10 +355,17 @@ async function coordinatorReset(id, source) {
   }
 }
 
-/* map a report event to the most-likely backend: explicit id wins,
-// else highest fail count, tie → least recently reset. */
-function mapEventToBackend(explicitId) {
+/* Map a report event to the backend whose IP actually served the failed
+// request: usage-limit events map via last-serve history for opencode.ai
+// (explicit id wins); anything else uses the fail-count heuristic. */
+const LIMIT_EVENTS = new Set(["freeusagelimit", "forbidden", "limit", "ip-limit", "429", "403"]);
+function mapEventToBackend(explicitId, eventName) {
   if (explicitId) return backends.find((b) => b.id === explicitId) || null;
+  if (eventName && LIMIT_EVENTS.has(String(eventName).toLowerCase())) {
+    const lastId = lastServe["opencode.ai"];
+    const b = lastId && backends.find((x) => x.id === lastId);
+    if (b) return b;
+  }
   const sorted = [...backends].sort((x, y) => (y.consecFails - x.consecFails) || (x.lastReset - y.lastReset));
   return sorted[0] || null;
 }
@@ -353,7 +384,7 @@ const api = http.createServer((req, res) => {
   if (u.pathname === "/health" && req.method === "GET") return sendJson(res, 200, { status: "ok", uptimeSeconds: Math.floor(process.uptime()) });
   if (u.pathname === "/" && req.method === "GET") {
     return sendJson(res, 200, {
-      instances: backends.map((b) => ({ id: b.id, running: Date.now() - b.lastOk < 2 * HEALTH_INTERVAL, public_ip: b.lastIp, consecFails: b.consecFails, lastReset: b.lastReset ? new Date(b.lastReset).toISOString() : null })),
+      instances: backends.map((b) => ({ id: b.id, running: Date.now() - b.lastOk < 2 * HEALTH_INTERVAL, public_ip: b.lastIp, consecFails: b.consecFails, quarantined: isQuarantined(b), lastReset: b.lastReset ? new Date(b.lastReset).toISOString() : null })),
       smart_reset: { ...totals, success_rate: totals.total_resets ? `${Math.round((100 * totals.success_count) / totals.total_resets)}%` : "n/a" },
       resetting, events,
     });
@@ -364,9 +395,24 @@ const api = http.createServer((req, res) => {
     req.on("end", async () => {
       let body = {};
       try { body = JSON.parse(raw || "{}"); } catch {}
-      const b = mapEventToBackend(body.instance);
+      const evtName = String(body.event || "?");
+      const b = mapEventToBackend(body.instance, evtName);
       if (!b) return sendJson(res, 400, { error: "no backend" });
-      event("report", b.id, `api event=${body.event || "?"}`);
+      event("report", b.id, `api event=${evtName}`);
+      if (LIMIT_EVENTS.has(evtName.toLowerCase())) {
+        // Usage-limit on this backend's IP: quarantine it NOW (RR skips it
+        // → traffic fails over to the healthy backend) and reset it in
+        // background for a fresh IP. Respond immediately so the router's
+        // next retry attempt already lands on the healthy backend.
+        b.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
+        event("quarantine", b.id, `excluded from RR for ${QUARANTINE_SECS}s (limit event)`);
+        if (AUTO_RESET) {
+          coordinatorReset(b.id, "api-limit").then((r) => {
+            if (r.code !== 200) log(`[coordinator] background reset ${b.id}: ${r.code} ${r.msg}`);
+          });
+        }
+        return sendJson(res, 202, { ok: true, msg: `backend ${b.id} quarantined, reset started` });
+      }
       const r = await coordinatorReset(b.id, "api");
       return sendJson(res, r.code, { ok: r.code === 200, msg: r.msg }, r.retryAfter ? { "Retry-After": String(r.retryAfter) } : {});
     });
