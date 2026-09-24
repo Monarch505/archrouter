@@ -178,6 +178,7 @@ start_pool() {
     --backend "a=127.0.0.1:$WARP_A_SOCKS" --backend "b=127.0.0.1:$WARP_B_SOCKS" \
     --reset-hook "$launcher_abs warp-reset %ID%" \
     --auto-reset "${ARCHROUTER_AUTO_RESET:-1}" \
+    --quarantine-secs "${ARCHROUTER_QUARANTINE_SECS:-300}" \
     ${ARCHROUTER_HEALTH_URL:+--health-url "$ARCHROUTER_HEALTH_URL"} \
     < /dev/null >>"$LOGS/pool.log" 2>&1 &
   echo $! >"$DATA/pool.pid"
