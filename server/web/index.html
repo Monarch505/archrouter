@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opencode-router</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Doto:wght@400..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #000000;
+    --surface: #111111;
+    --surface-raised: #1A1A1A;
+    --border: #222222;
+    --border-visible: #333333;
+    --text-disabled: #666666;
+    --text-secondary: #999999;
+    --text-primary: #E8E8E8;
+    --text-display: #FFFFFF;
+    --accent: #D71921;
+    --accent-subtle: rgba(215,25,33,0.15);
+    --success: #4A9E5C;
+    --warning: #D4A843;
+    --interactive: #5B9BF6;
+    --space-xs: 4px; --space-sm: 8px; --space-md: 16px; --space-lg: 24px;
+    --space-xl: 32px; --space-2xl: 48px; --space-3xl: 64px; --space-4xl: 96px;
+    --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--black);
+    color: var(--text-primary);
+    font: 400 15px/1.5 "Space Grotesk", system-ui, sans-serif;
+    padding: var(--space-xl) var(--space-xl) var(--space-3xl);
+    max-width: 1240px;
+    margin: 0 auto;
+  }
+  /* subtle dot-matrix backdrop — the Nothing canvas */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+    background-size: 24px 24px;
+    opacity: 0.35;
+  }
+  .mono { font-family: "Space Mono", monospace; }
+  .caps { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+
+  /* ============ HERO — primary layer ============ */
+  .masthead { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-md); }
+  .masthead .title { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.1em; font-size: 12px; color: var(--text-secondary); }
+  .masthead .endpoint { font-family: "Space Mono", monospace; font-size: 11px; color: var(--text-disabled); letter-spacing: 0.04em; }
+
+  .hero { display: flex; align-items: flex-end; gap: var(--space-3xl); margin: var(--space-2xl) 0 var(--space-2xl); }
+  .hero .metric { font-family: "Doto", "Space Mono", monospace; font-weight: 700; font-size: 88px; line-height: 0.9; letter-spacing: -0.03em; color: var(--text-display); }
+  .hero .unit { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.1em; font-size: 11px; color: var(--text-secondary); margin-top: var(--space-sm); }
+  .hero .stack { display: flex; flex-direction: column; gap: var(--space-sm); padding-bottom: var(--space-sm); }
+
+  /* stat rows (secondary) */
+  .statrow { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-lg); padding: var(--space-sm) 0; border-bottom: 1px solid var(--border); }
+  .statrow:last-child { border-bottom: none; }
+  .statrow .k { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; color: var(--text-secondary); }
+  .statrow .v { font-family: "Space Mono", monospace; font-size: 13px; color: var(--text-primary); text-align: right; word-break: break-all; }
+  .statrow .v.ok { color: var(--success); }
+  .statrow .v.err { color: var(--accent); }
+  .statrow .v.warn { color: var(--warning); }
+  .statrow .v.id { color: var(--interactive); font-size: 11px; }
+
+  /* ============ SECTION FRAME ============ */
+  section { margin-bottom: var(--space-2xl); }
+  .sec-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--space-md); }
+  .sec-head .t { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.1em; font-size: 12px; color: var(--text-display); }
+  .sec-head .meta { font-family: "Space Mono", monospace; font-size: 11px; color: var(--text-disabled); letter-spacing: 0.04em; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-lg); }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } .hero { flex-direction: column; gap: var(--space-lg); align-items: flex-start; } }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: var(--space-lg); }
+  .panel h3 { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.1em; font-size: 11px; color: var(--text-secondary); margin-bottom: var(--space-md); font-weight: 400; }
+
+  /* segmented progress bar — signature viz */
+  .bar { display: flex; gap: 2px; margin: var(--space-sm) 0 var(--space-md); }
+  .bar i { flex: 1; height: 10px; background: var(--border); display: block; }
+  .bar i.on { background: var(--text-display); }
+  .bar i.over { background: var(--accent); }
+  .bar i.good { background: var(--success); }
+  .bar i.warn { background: var(--warning); }
+
+  /* ============ CONTROLS ============ */
+  .row { display: flex; gap: var(--space-sm); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-sm); }
+  .grow { flex: 1; min-width: 160px; }
+
+  input, select {
+    background: transparent; color: var(--text-primary);
+    border: none; border-bottom: 1px solid var(--border-visible);
+    border-radius: 0; padding: 8px 4px; font: 400 13px "Space Mono", monospace;
+    outline: none; transition: border-color 200ms var(--ease);
+  }
+  input:focus, select:focus { border-bottom-color: var(--text-primary); }
+  input::placeholder { color: var(--text-disabled); }
+  select { cursor: pointer; }
+
+  button {
+    font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.06em;
+    font-size: 12px; min-height: 44px; padding: 0 var(--space-md); cursor: pointer;
+    border-radius: 999px; transition: opacity 200ms var(--ease), border-color 200ms var(--ease);
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .btn-p { background: var(--text-display); color: var(--black); border: 1px solid var(--text-display); }
+  .btn-s { background: transparent; color: var(--text-primary); border: 1px solid var(--border-visible); }
+  .btn-g { background: transparent; color: var(--text-secondary); border: none; min-height: 32px; padding: 0 var(--space-sm); }
+  .btn-g:hover { color: var(--text-primary); }
+
+  /* segmented control (proxy mode) */
+  .seg { display: inline-flex; border: 1px solid var(--border-visible); border-radius: 999px; overflow: hidden; }
+  .seg button { border: none; background: transparent; color: var(--text-secondary); min-height: 36px; padding: 0 var(--space-md); border-radius: 0; }
+  .seg button.on { background: var(--text-display); color: var(--black); }
+
+  /* tags / status */
+  .tag { display: inline-block; font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px; padding: 2px 10px; border: 1px solid var(--border-visible); border-radius: 999px; }
+  .tag.good { color: var(--success); border-color: var(--success); }
+  .tag.warn { color: var(--warning); border-color: var(--warning); }
+  .tag.bad { color: var(--accent); border-color: var(--accent); }
+  .tag.on { color: var(--text-display); border-color: var(--text-display); }
+
+  /* ============ TABLES ============ */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px; color: var(--text-secondary); font-weight: 400; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border-visible); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  td.mono, td.num { font-family: "Space Mono", monospace; }
+  td.num { text-align: right; }
+  th.num { text-align: right; }
+  td .del { font-family: "Space Mono", monospace; font-size: 11px; color: var(--text-secondary); background: none; border: none; cursor: pointer; min-height: 24px; padding: 0 4px; border-radius: 0; }
+  td .del:hover { color: var(--accent); }
+
+  /* accordion */
+  details { border-bottom: 1px solid var(--border); padding: var(--space-md) 0; }
+  details:last-child { border-bottom: none; }
+  summary { cursor: pointer; list-style: none; font-family: "Space Mono", monospace; text-transform: uppercase; letter-spacing: 0.1em; font-size: 12px; color: var(--text-display); display: flex; gap: var(--space-md); align-items: baseline; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "[ + ]"; color: var(--text-secondary); font-size: 11px; }
+  details[open] summary::before { content: "[ - ]"; }
+  summary .cnt { color: var(--text-secondary); font-size: 11px; }
+  details .body { margin-top: var(--space-md); }
+
+  /* models list */
+  #modelsList { max-height: 300px; overflow-y: auto; font-family: "Space Mono", monospace; font-size: 11px; color: var(--text-secondary); }
+  #modelsList div { padding: 4px 0; border-bottom: 1px solid var(--border); }
+
+  /* log */
+  #logs { max-height: 320px; overflow-y: auto; font-family: "Space Mono", monospace; font-size: 11px; }
+  #logs .line { padding: 4px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); }
+  #logs .line .s { color: var(--text-disabled); }
+  #logs .line .ok { color: var(--success); }
+  #logs .line .err { color: var(--accent); }
+  #logs .line .rot { color: var(--warning); }
+
+  /* test output */
+  #testOut { font-family: "Space Mono", monospace; font-size: 11px; color: var(--text-secondary); max-height: 220px; overflow: auto; white-space: pre-wrap; margin-top: var(--space-sm); }
+
+  .dim { color: var(--text-secondary); }
+  .sub { color: var(--text-disabled); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<!-- masthead -->
+<div class="masthead">
+  <div class="title">opencode-router</div>
+  <div class="endpoint" id="baseUrl">-</div>
+</div>
+
+<!-- hero: primary layer — total requests (Doto dot-matrix moment) -->
+<div class="hero">
+  <div>
+    <div class="metric" id="usageHero">0</div>
+    <div class="unit">total requests</div>
+  </div>
+  <div class="stack">
+    <div class="statrow" style="min-width:320px"><span class="k">mode</span><span class="v" id="mode">-</span></div>
+    <div class="statrow"><span class="k">uptime</span><span class="v" id="uptime">-</span></div>
+    <div class="statrow"><span class="k">ok / err / rot</span><span class="v" id="usageBreakdown">-</span></div>
+    <div class="statrow"><span class="k">models</span><span class="v" id="modelCount">-</span></div>
+    <div class="statrow"><span class="k">retries</span><span class="v" id="retries">-</span></div>
+  </div>
+</div>
+
+<!-- identity + pool: secondary layer -->
+<div class="grid2">
+  <section>
+    <div class="sec-head"><span class="t">Identity</span><span class="meta">x-opencode-*</span></div>
+    <div class="panel">
+      <div class="statrow"><span class="k">session</span><span class="v id" id="session">-</span></div>
+      <div class="statrow"><span class="k">user</span><span class="v id" id="user">-</span></div>
+      <div class="row" style="margin-top:var(--space-md);justify-content:flex-end">
+        <button id="btnRotate" class="btn-s">Rotate now</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="t">Proxy pool</span><span class="meta" id="poolInfo">-</span></div>
+    <div class="panel">
+      <div class="statrow"><span class="k">usable / pool</span><span class="v" id="poolUsable">-</span></div>
+      <div class="bar" id="poolBar" aria-label="usable proxies"></div>
+      <div class="statrow"><span class="k">cursor</span><span class="v" id="poolCursor">-</span></div>
+      <div class="statrow"><span class="k">exhausted</span><span class="v warn" id="poolExhausted">-</span></div>
+      <div class="statrow"><span class="k">dead</span><span class="v" id="poolDead">-</span></div>
+      <div class="statrow"><span class="k">last fetch</span><span class="v" id="poolFetch">-</span></div>
+      <div class="statrow"><span class="k">next reset</span><span class="v" id="poolReset">-</span></div>
+      <div class="row" style="margin-top:var(--space-md)">
+        <div class="seg" id="modeSeg" role="group" aria-label="proxy mode">
+          <button data-mode="none">none</button>
+          <button data-mode="upstream">upstream</button>
+          <button data-mode="manual">manual</button>
+          <button data-mode="embedded">embedded</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- manual proxies (accordion) -->
+<section>
+  <details>
+    <summary>Manual proxies <span class="cnt" id="proxySummary">-</span></summary>
+    <div class="body">
+      <div class="row">
+        <input id="proxyUrl" class="grow" placeholder="http://1.2.3.4:8080">
+        <button id="btnAddProxy" class="btn-p">Add</button>
+        <button id="btnRefreshProxies" class="btn-s">Refresh sources</button>
+      </div>
+      <div class="sub" style="margin-bottom:var(--space-sm)">sources: <span class="mono" id="proxySources">-</span></div>
+      <div id="proxyList" style="max-height:300px;overflow:auto">
+        <table>
+          <thead><tr><th>#</th><th>URL</th><th>State</th><th class="num"></th></tr></thead>
+          <tbody id="proxyBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- combos (accordion) -->
+<section>
+  <details>
+    <summary>Combos <span class="cnt" id="comboSummary">-</span></summary>
+    <div class="body">
+      <div class="row">
+        <input id="comboName" class="grow" placeholder="combo name, e.g. ClaudePick">
+        <input id="comboModel" class="grow" placeholder="opencode model, e.g. big-pickle">
+        <button id="btnAddCombo" class="btn-p">Add</button>
+      </div>
+      <table>
+        <thead><tr><th>Combo</th><th>Target model</th><th class="num"></th></tr></thead>
+        <tbody id="comboBody"></tbody>
+      </table>
+    </div>
+  </details>
+</section>
+
+<!-- test + models -->
+<div class="grid2">
+  <section>
+    <div class="sec-head"><span class="t">Test completion</span><span class="meta">POST /v1/chat/completions</span></div>
+    <div class="panel">
+      <div class="row">
+        <input id="testModel" class="grow" value="oc/big-pickle" placeholder="model">
+        <input id="testMessage" class="grow" value="ping" placeholder="message">
+      </div>
+      <div class="row">
+        <select id="testStream" class="grow"><option value="true">stream: true</option><option value="false">stream: false</option></select>
+        <button id="btnTest" class="btn-p">Send</button>
+      </div>
+      <pre id="testOut"></pre>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="t">Models</span><span class="meta">opencode.ai/zen/v1/models</span></div>
+    <div class="panel">
+      <div class="row">
+        <input id="modelFilter" class="grow" placeholder="filter... free, gpt, claude">
+        <button id="btnRefreshModels" class="btn-s">Refresh</button>
+      </div>
+      <div id="modelsList"></div>
+    </div>
+  </section>
+</div>
+
+<!-- request log -->
+<section>
+  <div class="sec-head"><span class="t">Request log</span><span class="meta">live</span></div>
+  <div id="logs"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let logs = [];
+
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m ${sec}s` : `${m}m ${sec}s`;
+}
+
+/* ---- status / hero ---- */
+async function refreshStatus() {
+  try {
+    const r = await fetch("/api/status");
+    const s = await r.json();
+    $("usageHero").textContent = s.usageTotal.requests ?? 0;
+    $("usageBreakdown").textContent = `${s.usageTotal.ok} / ${s.usageTotal.error} / ${s.usageTotal.rotated}`;
+    $("uptime").textContent = fmtUptime(s.uptimeSeconds);
+    $("mode").textContent = s.mode;
+    $("modelCount").textContent = s.modelCount ?? "-";
+    $("retries").textContent = s.retries;
+    $("baseUrl").textContent = `http://${s.host}:${s.port}/v1`;
+    $("session").textContent = s.identity.session;
+    $("user").textContent = s.identity.user;
+    // segmented control active state
+    for (const b of $("modeSeg").querySelectorAll("button")) b.classList.toggle("on", b.dataset.mode === s.mode);
+  } catch (e) { console.error(e); }
+}
+
+/* ---- models ---- */
+async function refreshModels() {
+  try {
+    const r = await fetch("/api/models");
+    const m = await r.json();
+    const filter = ($("modelFilter").value || "").toLowerCase();
+    const ids = (m.data || []).map((x) => x.id);
+    $("modelCount").textContent = ids.length;
+    const list = filter ? ids.filter((i) => i.toLowerCase().includes(filter)) : ids;
+    $("modelsList").innerHTML = list.map((i) => `<div>${i}</div>`).join("") || '<div class="dim">none</div>';
+  } catch (e) { console.error(e); }
+}
+
+/* ---- pool ---- */
+async function refreshPool() {
+  try {
+    const r = await fetch("/api/pool");
+    const p = await r.json();
+    if (p.mode === "none") {
+      $("poolInfo").textContent = "direct — session auto-rotates on 429";
+      $("poolUsable").textContent = "-";
+      $("poolBar").innerHTML = "";
+      $("poolCursor").textContent = "-"; $("poolExhausted").textContent = "-"; $("poolDead").textContent = "-"; $("poolFetch").textContent = "-"; $("poolReset").textContent = "-";
+      return;
+    }
+    if (p.mode === "upstream") {
+      $("poolInfo").textContent = `upstream: ${p.upstream}`;
+      $("poolUsable").textContent = "-";
+      $("poolBar").innerHTML = "";
+      $("poolCursor").textContent = "-"; $("poolExhausted").textContent = "-"; $("poolDead").textContent = "-"; $("poolFetch").textContent = "-"; $("poolReset").textContent = "-";
+      return;
+    }
+    $("poolInfo").textContent = `fallback — rotate on 429 limit`;
+    const usable = p.usableCount ?? 0;
+    const total = p.poolSize ?? 0;
+    $("poolUsable").textContent = `${usable} / ${total}`;
+    // segmented bar: usable ratio, over = red if usable < minLive
+    const segs = 20;
+    const filled = total ? Math.round((usable / total) * segs) : 0;
+    const low = usable < (p.minLiveProxies ?? 3);
+    $("poolBar").innerHTML = Array.from({ length: segs }, (_, i) => {
+      const on = i < filled;
+      const cls = on ? (low ? "over" : "good") : "";
+      return `<i class="${cls}"></i>`;
+    }).join("");
+    $("poolCursor").textContent = p.cursor ?? 0;
+    $("poolExhausted").textContent = p.exhaustedCount ?? 0;
+    $("poolDead").textContent = p.deadCount ?? 0;
+    $("poolFetch").textContent = p.lastFetch ? new Date(p.lastFetch).toLocaleTimeString() : "-";
+    $("poolReset").textContent = p.nextResetAt ? new Date(p.nextResetAt).toLocaleString() : "-";
+  } catch (e) { console.error(e); }
+}
+
+/* ---- manual proxies ---- */
+async function refreshProxies() {
+  try {
+    const r = await fetch("/api/proxies");
+    const d = await r.json();
+    const list = d.proxies || [];
+    $("proxySummary").textContent = `${list.length} proxy`;
+    let exhausted = new Set();
+    try {
+      const pr = await fetch("/api/pool");
+      const pj = await pr.json();
+      if (pj.mode === "manual") exhausted = new Set((pj.exhausted || []).map((x) => x.url));
+    } catch {}
+    $("proxyBody").innerHTML = list.length
+      ? list.map((p, i) => {
+          const isEx = exhausted.has(p.url);
+          return `<tr><td class="num">${i + 1}</td><td class="mono">${p.url}</td><td>${isEx ? '<span class="tag warn">exhausted</span>' : '<span class="tag on">ready</span>'}</td><td class="num"><button class="del" data-remove="${p.url}">[ remove ]</button></td></tr>`;
+        }).join("")
+      : `<tr><td colspan="4" class="sub">no proxies — add or refresh sources</td></tr>`;
+    for (const btn of $("proxyBody").querySelectorAll("[data-remove]")) {
+      btn.onclick = async () => {
+        await fetch("/api/proxies/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: btn.dataset.remove }) });
+        refreshProxies(); refreshPool();
+      };
+    }
+    try {
+      const pr = await fetch("/api/pool");
+      const pj = await pr.json();
+      $("proxySources").textContent = (pj.sources || []).length ? pj.sources.join(" ; ") : "-";
+    } catch {}
+  } catch (e) { console.error(e); }
+}
+$("btnAddProxy").onclick = async () => {
+  const url = $("proxyUrl").value.trim();
+  if (!url) return;
+  const r = await fetch("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+  const d = await r.json();
+  if (!d.ok && d.error) alert("failed: " + d.error);
+  $("proxyUrl").value = "";
+  refreshProxies(); refreshPool();
+};
+$("btnRefreshProxies").onclick = async () => {
+  const btn = $("btnRefreshProxies");
+  btn.textContent = "refreshing..."; btn.disabled = true;
+  try {
+    const r = await fetch("/api/proxies/refresh", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok && d.error) alert("refresh failed: " + d.error);
+  } finally {
+    btn.textContent = "Refresh sources"; btn.disabled = false;
+    refreshProxies(); refreshPool();
+  }
+};
+
+/* ---- combos ---- */
+async function refreshCombos() {
+  try {
+    const r = await fetch("/api/combos");
+    const d = await r.json();
+    const combos = d.combos || {};
+    $("comboSummary").textContent = `${Object.keys(combos).length} combo`;
+    $("comboBody").innerHTML = Object.entries(combos).map(([name, v]) => {
+      const model = typeof v === "string" ? v : v.model || "";
+      return `<tr><td class="mono">${name}</td><td class="mono">${model}</td><td class="num"><button class="del" data-rm="${name}">[ remove ]</button></td></tr>`;
+    }).join("") || `<tr><td colspan="3" class="sub">no combos</td></tr>`;
+    for (const btn of $("comboBody").querySelectorAll("[data-rm]")) {
+      btn.onclick = async () => {
+        await fetch("/api/combos/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: btn.dataset.rm }) });
+        refreshCombos(); refreshModels();
+      };
+    }
+  } catch (e) { console.error(e); }
+}
+$("btnAddCombo").onclick = async () => {
+  const name = $("comboName").value.trim();
+  const model = $("comboModel").value.trim();
+  if (!name || !model) return;
+  const r = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, model }) });
+  const d = await r.json();
+  if (!d.ok && d.error) alert("failed: " + d.error);
+  $("comboName").value = ""; $("comboModel").value = "";
+  refreshCombos(); refreshModels();
+};
+
+/* ---- logs ---- */
+async function refreshLogs() {
+  try {
+    const r = await fetch("/api/logs?limit=50");
+    const d = await r.json();
+    logs = d.logs || [];
+    renderLogs();
+  } catch (e) { console.error(e); }
+}
+function renderLogs() {
+  $("logs").innerHTML = logs.map((l) => {
+    const badge = l.status >= 200 && l.status < 400 ? '<span class="ok">ok</span>' : l.rotated ? '<span class="rot">rot</span>' : '<span class="err">err</span>';
+    const ts = (l.ts || "").replace("T", " ").replace("Z", "").slice(11, 19);
+    return `<div class="line"><span class="s">${ts}</span> [${badge}] ${l.type || l.kind || "chat"} ${l.model || ""} ${l.status ?? ""} ${l.proxy ? "via " + l.proxy : ""} ${l.chunks ? l.chunks + "ch" : ""} ${l.finish ? "fin=" + l.finish : ""} ${l.error ? '<span class="err">' + l.error + "</span>" : ""}</div>`;
+  }).join("") || '<div class="sub">no requests yet</div>';
+}
+
+/* ---- actions ---- */
+$("btnRotate").onclick = async () => {
+  const r = await fetch("/api/rotate", { method: "POST" });
+  const d = await r.json();
+  $("session").textContent = d.identity.session;
+  $("user").textContent = d.identity.user;
+};
+$("modeSeg").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: { mode } }) });
+  const d = await r.json();
+  if (!d.ok) alert("failed: " + (d.error || "unknown"));
+  refreshStatus(); refreshPool();
+});
+$("btnRefreshModels").onclick = async () => {
+  await fetch("/api/models/refresh", { method: "POST" });
+  refreshModels();
+};
+$("modelFilter").oninput = refreshModels;
+$("btnTest").onclick = async () => {
+  const model = $("testModel").value.trim();
+  const message = $("testMessage").value.trim();
+  const stream = $("testStream").value === "true";
+  const out = $("testOut");
+  out.textContent = "[LOADING]";
+  const t0 = Date.now();
+  try {
+    const r = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: message }], stream }),
+    });
+    const text = await r.text();
+    const ms = Date.now() - t0;
+    if (stream) {
+      const chunks = text.split(/\r?\n/).filter((l) => l.startsWith("data:") && l !== "data: [DONE]").length;
+      out.textContent = `HTTP ${r.status} in ${ms}ms | ${chunks} events\n\n` + text.slice(0, 3000);
+    } else {
+      out.textContent = `HTTP ${r.status} in ${ms}ms\n\n` + text.slice(0, 3000);
+    }
+    refreshLogs();
+  } catch (e) {
+    out.textContent = "[ERROR: " + e.message + "]";
+  }
+};
+
+setInterval(refreshStatus, 3000);
+setInterval(refreshPool, 5000);
+setInterval(refreshLogs, 3000);
+refreshStatus(); refreshModels(); refreshPool(); refreshLogs();
+refreshProxies(); refreshCombos();
+</script>
+</body>
+</html>

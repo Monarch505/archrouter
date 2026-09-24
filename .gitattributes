@@ -1,0 +1,7 @@
+# keep shell scripts LF so they run on Linux (Windows checkout would add CRLF)
+install.sh text eol=lf
+archrouter text eol=lf
+scripts/*.sh text eol=lf
+*.js text eol=lf
+*.py text eol=lf
+*.md text eol=lf

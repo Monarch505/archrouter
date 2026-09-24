@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# archrouter — launcher for monarch-router (Linux / Termux).
+# Usage: archrouter start|stop|restart|status|logs|warp-setup|warp-reset [a|b]|doctor|version
+set -u
+PROG="archrouter"
+VERSION="0.1.0"
+
+# --- base paths -------------------------------------------------------------
+if [ -n "${ARCHROUTER_HOME:-}" ]; then
+  BASE="$ARCHROUTER_HOME"
+else
+  BASE="$HOME/.archrouter"
+fi
+DATA="$BASE/data"; LOGS="$DATA/logs"; WARP="$BASE/warp"; BINBASE="$BASE/bin"
+
+# persisted env ($BASE/.env) — explicit CLI env wins over file values
+if [ -f "$BASE/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$BASE/.env" 2>/dev/null || true
+  set +a
+fi
+
+if [ -n "${PREFIX:-}" ] && [[ "$PREFIX" == *"com.termux"* ]]; then
+  PLATFORM="termux"
+else
+  PLATFORM="linux"
+fi
+
+# --- ports (override via env) ------------------------------------------------
+API_PORT="${ARCHROUTER_PORT:-20399}"
+API_HOST="${ARCHROUTER_HOST:-127.0.0.1}"
+POOL_SOCKS="${ARCHROUTER_POOL_SOCKS:-11801}"
+WARP_A_SOCKS="${ARCHROUTER_WARP_A:-11810}"
+WARP_B_SOCKS="${ARCHROUTER_WARP_B:-11811}"
+STATUS_PORT="${ARCHROUTER_STATUS_PORT:-9190}"
+
+# --- binary resolution ---------------------------------------------------------
+ARCH="$(uname -m)"
+find_bin() { # $1=name → echo path or ""
+  if [ -x "$BINBASE/$ARCH/$1" ]; then echo "$BINBASE/$ARCH/$1"; return; fi
+  command -v "$1" 2>/dev/null || echo ""
+}
+SINGBOX="$(find_bin sing-box)"
+WGCF="$(find_bin wgcf)"
+
+# Detach survivors from the invoking session: without setsid, background
+# children die when the parent wsl/ssh session closes. Empty fallback keeps
+# minimal systems working.
+DETACH=""
+command -v setsid >/dev/null 2>&1 && DETACH="setsid"
+
+# map pool instance id → warp dir name (pool uses a|b or warpa|warpb)
+warp_dirname() {
+  case "${1:-}" in
+    a|warpa|warp-a) echo "warp-a" ;;
+    b|warpb|warp-b) echo "warp-b" ;;
+    *) echo "" ;;
+  esac
+}
+# --- repo location (this script lives in repo root or ~/.local/bin) ---------
+resolve_repo() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do src="$(readlink "$src")"; done
+  local d; d="$(cd "$(dirname "$src")" && pwd)"
+  if [ -f "$d/server/server.js" ]; then echo "$d"; return; fi
+  if [ -n "${ARCHROUTER_REPO:-}" ] && [ -f "$ARCHROUTER_REPO/server/server.js" ]; then
+    echo "$ARCHROUTER_REPO"; return
+  fi
+  echo "$d"
+}
+REPO="$(resolve_repo)"
+SERVER_JS="$REPO/server/server.js"
+POOL_JS="$REPO/pool/pool.js"
+
+log()  { echo "[$PROG] $*"; }
+die()  { echo "[$PROG] ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+port_free() { # $1=port → 0 if free
+  if command -v ss >/dev/null 2>&1; then
+    ! ss -ltn 2>/dev/null | grep -q ":$1[[:space:]]"
+  else
+    ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+  fi
+}
+
+pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+read_pid()  { [ -f "$DATA/$1.pid" ] && cat "$DATA/$1.pid" || echo ""; }
+
+# --- subcommands -------------------------------------------------------------
+cmd_version() { echo "$PROG $VERSION (platform=$PLATFORM base=$BASE)"; }
+
+cmd_doctor() {
+  local ok=0 fail=0
+  say() { if [ "$1" = ok ]; then ok=$((ok+1)); echo "  [ok] $2"; else fail=$((fail+1)); echo "  [!!] $2"; fi; }
+  echo "== $PROG doctor (platform=$PLATFORM) =="
+  if command -v node >/dev/null 2>&1; then
+    local v; v="$(node -v | sed 's/^v//;s/\..*//')"
+    [ "$v" -ge 22 ] && say ok "node $(node -v) (>=22, sqlite ready)" \
+                     || say bad "node $(node -v) (<22 → JSON fallback, D6)"
+  else say bad "node not found (need >=22)"; fi
+  [ -f "$SERVER_JS" ] && say ok "server.js present" || say bad "server.js missing ($SERVER_JS)"
+  [ -f "$POOL_JS" ] && say ok "pool.js present" || say bad "pool.js missing (Fase 3)"
+  for p in "$API_PORT" "$POOL_SOCKS" "$WARP_A_SOCKS" "$WARP_B_SOCKS" "$STATUS_PORT"; do
+    port_free "$p" && say ok "port $p free" || say bad "port $p in use"
+  done
+  local arch; arch="$(uname -m)"
+  for b in wgcf sing-box; do
+    [ -x "$BINBASE/$arch/$b" ] && say ok "bin $b ($arch)" || say bad "bin $b missing (run install.sh / provision)"
+  done
+  for w in warp-a warp-b; do
+    [ -f "$WARP/$w/wgcf-account.toml" ] && say ok "$w account" || say bad "$w account missing (archrouter warp-setup)"
+  done
+  curl -s -o /dev/null --max-time 8 https://opencode.ai/zen/v1/models \
+    && say ok "upstream opencode.ai reachable" \
+    || say bad "upstream unreachable (WSL network? see PLAN Fase 0 note)"
+  echo "== result: $ok ok, $fail problem(s) =="
+  [ "$fail" -eq 0 ]
+}
+
+cmd_start() {
+  need node
+  [ -f "$SERVER_JS" ] || die "server.js missing — Fase 2 belum di-deploy"
+  mkdir -p "$DATA" "$LOGS"
+  local mode="${ARCHROUTER_MODE:-none}"
+  local want_warp=0; [ "$mode" = "warp" ] && want_warp=1
+  if [ "$want_warp" -eq 1 ]; then
+    [ -f "$WARP/warp-a/sing-box.json" ] && [ -f "$WARP/warp-b/sing-box.json" ] \
+      || die "mode=warp but warp configs missing — run: $PROG warp-setup"
+    [ -n "$SINGBOX" ] || die "sing-box not found (run install.sh / provision)"
+    [ -f "$POOL_JS" ] || die "pool.js missing"
+  fi
+  for p in "$API_PORT"; do
+    port_free "$p" || die "port $p in use — stop dulu atau set ARCHROUTER_PORT"
+  done
+  if [ "$want_warp" -eq 1 ]; then
+    for p in "$POOL_SOCKS" "$WARP_A_SOCKS" "$WARP_B_SOCKS" "$STATUS_PORT"; do
+      port_free "$p" || die "port $p in use — stop dulu ($PROG stop)"
+    done
+    start_singbox warp-a "$WARP_A_SOCKS"
+    start_singbox warp-b "$WARP_B_SOCKS"
+    start_pool
+  fi
+  local old; old="$(read_pid router)"
+  if pid_alive "$old"; then log "router already running (pid $old)"; return 0; fi
+  log "starting router :$API_PORT (mode=$mode) ..."
+  # shellcheck disable=SC2086
+  $DETACH nohup node "$SERVER_JS" --port "$API_PORT" --host "$API_HOST" \
+    --mode "$mode" ${ARCHROUTER_EXTRA_ARGS:-} \
+    < /dev/null >>"$LOGS/router.log" 2>&1 &
+  echo $! >"$DATA/router.pid"
+  sleep 1
+  pid_alive "$(read_pid router)" && log "router pid $(read_pid router)" \
+    || die "router failed to start — see $LOGS/router.log"
+}
+
+start_singbox() { # $1=warp-a|warp-b $2=port
+  local name="$1" port="$2"
+  local old; old="$(read_pid "$name")"
+  if pid_alive "$old"; then log "$name already running (pid $old)"; return 0; fi
+  log "starting $name :$port ..."
+  $DETACH nohup "$SINGBOX" run -c "$WARP/$name/sing-box.json" \
+    < /dev/null >>"$LOGS/$name.log" 2>&1 &
+  echo $! >"$DATA/$name.pid"
+  sleep 1
+  pid_alive "$(read_pid "$name")" && log "$name pid $(read_pid "$name")" \
+    || die "$name failed to start — see $LOGS/$name.log"
+}
+
+start_pool() {
+  local old; old="$(read_pid pool)"
+  if pid_alive "$old"; then log "pool already running (pid $old)"; return 0; fi
+  local launcher_abs; launcher_abs="$(readlink -f "${BASH_SOURCE[0]}")"
+  log "starting pool :$POOL_SOCKS (backends a=:$WARP_A_SOCKS b=:$WARP_B_SOCKS) ..."
+  # shellcheck disable=SC2086
+  $DETACH nohup node "$POOL_JS" --listen "127.0.0.1:$POOL_SOCKS" --status-port "$STATUS_PORT" \
+    --backend "a=127.0.0.1:$WARP_A_SOCKS" --backend "b=127.0.0.1:$WARP_B_SOCKS" \
+    --reset-hook "$launcher_abs warp-reset %ID%" \
+    --auto-reset "${ARCHROUTER_AUTO_RESET:-1}" \
+    ${ARCHROUTER_HEALTH_URL:+--health-url "$ARCHROUTER_HEALTH_URL"} \
+    < /dev/null >>"$LOGS/pool.log" 2>&1 &
+  echo $! >"$DATA/pool.pid"
+  sleep 1
+  pid_alive "$(read_pid pool)" && log "pool pid $(read_pid pool)" \
+    || die "pool failed to start — see $LOGS/pool.log"
+}
+
+cmd_stop() {
+  local stopped=0
+  for n in router pool; do
+    local p; p="$(read_pid $n)"
+    if pid_alive "$p"; then kill "$p" 2>/dev/null; stopped=1; log "stopped $n (pid $p)"; fi
+    rm -f "$DATA/$n.pid"
+  done
+  # warp backends (sing-box per instance)
+  for w in warp-a warp-b; do
+    local p; p="$(read_pid $w)"
+    if pid_alive "$p"; then kill "$p" 2>/dev/null; stopped=1; log "stopped $w (pid $p)"; fi
+    rm -f "$DATA/$w.pid"
+  done
+  [ "$stopped" -eq 0 ] && log "nothing running"
+}
+
+cmd_status() {
+  for n in router pool warp-a warp-b; do
+    local p; p="$(read_pid $n)"
+    if pid_alive "$p"; then echo "  $n: RUNNING (pid $p)"
+    else echo "  $n: stopped"; fi
+  done
+  curl -s --max-time 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null && echo || echo "  api :$API_PORT no response"
+}
+
+cmd_logs() {
+  local f="${1:-router}"; shift 2>/dev/null || true
+  tail -n 100 -f "$LOGS/$f.log" 2>/dev/null || die "no log $LOGS/$f.log"
+}
+
+cmd_warp_setup() {
+  # Idempotent: existing warp-a|b account dirs are kept (NEVER re-register
+  # silently — that burns a new WARP device slot each time). Use --force to
+  # wipe and register fresh.
+  local force=0
+  for a in "$@"; do [ "$a" = "--force" ] && force=1; done
+  [ -n "$WGCF" ] || die "wgcf not found (run install.sh / provision)"
+  need node
+  mkdir -p "$WARP/warp-a" "$WARP/warp-b"
+  for w in warp-a warp-b; do
+    local d="$WARP/$w"
+    if [ -f "$d/wgcf-account.toml" ] && [ "$force" -eq 0 ]; then
+      log "$w: account exists, keeping (use --force to re-register)"
+    else
+      [ "$force" -eq 1 ] && rm -f "$d/wgcf-account.toml" "$d/wgcf-profile.conf"
+      log "$w: registering new WARP device ..."
+      ( cd "$d" && "$WGCF" register --accept-tos ) \
+        || die "$w: wgcf register failed"
+      ( cd "$d" && "$WGCF" generate ) \
+        || die "$w: wgcf generate failed"
+    fi
+    local port="$WARP_A_SOCKS"; [ "$w" = "warp-b" ] && port="$WARP_B_SOCKS"
+    node "$REPO/pool/gen-singbox.js" "$d" "$port" \
+      || die "$w: gen-singbox failed"
+    "$SINGBOX" check -c "$d/sing-box.json" \
+      || die "$w: sing-box check failed"
+  done
+  log "warp-setup done (configs validated)"
+}
+
+cmd_warp_reset() {
+  # Pool coordinator hook: bounce ONE instance (default a) without touching
+  # the other. Bounce = graceful restart; wgcf account/profile reused, so the
+  # endpoint re-handshakes (new WARP session → likely new egress IP).
+  local id; id="$(warp_dirname "${1:-a}")"
+  [ -n "$id" ] || die "usage: $PROG warp-reset [a|b]"
+  [ -n "$SINGBOX" ] || die "sing-box not found"
+  local cfg="$WARP/$id/sing-box.json"
+  [ -f "$cfg" ] || die "$id config missing — run: $PROG warp-setup"
+  local old; old="$(read_pid "$id")"
+  if pid_alive "$old"; then
+    kill "$old" 2>/dev/null
+    for _ in $(seq 1 15); do pid_alive "$old" || break; sleep 1; done
+    pid_alive "$old" && kill -9 "$old" 2>/dev/null
+    rm -f "$DATA/$id.pid"
+    log "$id stopped (pid $old)"
+  else
+    log "$id not running (starting fresh)"
+  fi
+  local port="$WARP_A_SOCKS"; [ "$id" = "warp-b" ] && port="$WARP_B_SOCKS"
+  start_singbox "$id" "$port"
+  log "$id reset done"
+}
+
+case "${1:-help}" in
+  start|stop|restart|status|logs|doctor|version|warp-setup|warp-reset) ;;
+  help|-h|--help)
+    echo "Usage: $PROG start|stop|restart|status|logs [name]|warp-setup|warp-reset [a|b]|doctor|version"; exit 0 ;;
+  *) die "unknown command '$1' (try: $PROG help)" ;;
+esac
+
+cmd="$1"; shift || true
+case "$cmd" in
+  start) cmd_start "$@" ;;
+  stop) cmd_stop ;;
+  restart) cmd_stop; sleep 1; cmd_start "$@" ;;
+  status) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  doctor) cmd_doctor ;;
+  version) cmd_version ;;
+  warp-setup) cmd_warp_setup "$@" ;;
+  warp-reset) cmd_warp_reset "$@" ;;
+esac

@@ -1,0 +1,9 @@
+# runtime (never commit)
+data/
+.env
+bin/
+
+# editor / OS
+.DS_Store
+*~
+*.swp
