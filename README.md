@@ -53,3 +53,9 @@ Config: `~/.archrouter/.env` (copied from `.env.example` on install;
 sourced automatically — `ARCHROUTER_MODE=warp` default).
 Override per-invocation via env, e.g. `ARCHROUTER_MODE=none archrouter start`
 (direct, no WARP — use on UDP-filtered networks).
+
+Chroot/Android note: if sing-box logs `missing default interface` /
+`network is unreachable` (no default route in the main table), set
+`ARCHROUTER_NET_IF=wlan0` in `~/.archrouter/.env`, then
+`archrouter warp-setup` (regenerates configs, keeps accounts) +
+`archrouter restart`. If the ISP filters UDP 2408, try `ARCHROUTER_WG_PORT=500`.

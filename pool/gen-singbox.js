@@ -63,6 +63,13 @@ async function main() {
   }
   // Proven recipe (WSL 2026-09-22): IPv4-only, MTU 1420, hostname endpoint,
   // reserved [0,0,0]. Device-ID-derived reserved NEVER handshakes in sing-box.
+  // Chroot/Android fix: no default route in the main table → sing-box can't
+  // auto-detect egress ("missing default interface" / "network unreachable").
+  // ARCHROUTER_NET_IF pins it (e.g. wlan0). ARCHROUTER_WG_PORT overrides the
+  // peer port (default 2408 from wgcf profile; Cloudflare also answers
+  // 500/4500 — useful when an ISP filters 2408).
+  const bindIf = (process.env.ARCHROUTER_NET_IF || "").trim();
+  const wgPort = Number(process.env.ARCHROUTER_WG_PORT || serverPort || 2408);
   const addresses = ["172.16.0.2/32"];
   const cfg = {
     log: { level: "warning", output: path.join(dir, "sing-box.log") },
@@ -81,16 +88,19 @@ async function main() {
       private_key: iface.PrivateKey,
       peers: [{
         address: peerAddr,
-        port: Number(serverPort || 2408),
+        port: wgPort,
         public_key: peer.PublicKey,
         allowed_ips: ["0.0.0.0/0"],
         reserved: [0, 0, 0],
       }],
       mtu: 1420,
+      // empty = auto-detect (normal Linux); set ARCHROUTER_NET_IF on
+      // chroot/Android where the main table has no default route.
+      ...(bindIf ? { bind_interface: bindIf } : {}),
     }],
     // All inbound traffic exits via the WARP endpoint (sing-box >= 1.13 schema;
     // legacy wireguard-outbound was removed — verified against official docs).
-    route: { rules: [], final: "warp-ep" },
+    route: { rules: [], final: "warp-ep", ...(bindIf ? { default_interface: bindIf } : {}) },
   };
   const outPath = path.join(dir, "sing-box.json");
   fs.writeFileSync(outPath, JSON.stringify(cfg, null, 2) + "\n");
