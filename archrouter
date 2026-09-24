@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # archrouter — launcher for monarch-router (Linux / Termux).
-# Usage: archrouter start|stop|restart|status|logs|warp-setup|warp-reset [a|b]|doctor|version
+# Usage: archrouter start|stop|restart|status|logs|update|rollback|warp-setup|warp-reset [a|b]|doctor|version
 set -u
 PROG="archrouter"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # --- base paths -------------------------------------------------------------
 if [ -n "${ARCHROUTER_HOME:-}" ]; then
@@ -217,6 +217,81 @@ cmd_logs() {
   tail -n 100 -f "$LOGS/$f.log" 2>/dev/null || die "no log $LOGS/$f.log"
 }
 
+repo_head() { git -C "$REPO" rev-parse HEAD 2>/dev/null || echo ""; }
+
+cmd_update() {
+  # Self-update: fetch origin → reset --hard → restart stack → verify.
+  # Only the repo is touched; $BASE (.env, WARP accounts, DB, logs) is kept.
+  local check=0 no_restart=0 force=0 full=0
+  for a in "$@"; do
+    case "$a" in
+      --check) check=1 ;;
+      --no-restart) no_restart=1 ;;
+      --force) force=1 ;;
+      --full) full=1 ;;
+      *) die "usage: $PROG update [--check|--no-restart|--force|--full]" ;;
+    esac
+  done
+  [ -d "$REPO/.git" ] || die "not a git clone ($REPO) — update needs origin"
+  need git
+  log "fetching origin ..."
+  git -C "$REPO" fetch origin || die "fetch failed (network?) — nothing changed"
+  local branch; branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  local remote="origin/$branch"
+  git -C "$REPO" rev-parse --verify "$remote" >/dev/null 2>&1 \
+    || { log "no $remote — trying origin/main"; remote="origin/main"; }
+  git -C "$REPO" rev-parse --verify "$remote" >/dev/null 2>&1 \
+    || die "no remote branch ($remote) — nothing changed"
+  local before after
+  before="$(repo_head)"
+  after="$(git -C "$REPO" rev-parse "$remote")"
+  if [ "$before" = "$after" ]; then log "already up to date ($before)"; return 0; fi
+  if [ "$check" -eq 1 ]; then
+    log "update available: $before → $after"
+    git -C "$REPO" log --oneline "$before..$after" | head -20
+    return 0
+  fi
+  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && [ "$force" -eq 0 ]; then
+    die "repo has local modifications — commit/stash or re-run with --force (local changes will be lost)"
+  fi
+  echo "$before" >"$DATA/update.prev"
+  if [ "$no_restart" -eq 0 ]; then cmd_stop; sleep 1; fi
+  git -C "$REPO" reset --hard "$after" || die "reset failed"
+  chmod +x "$REPO/install.sh" "$REPO/archrouter" "$REPO/scripts/"*.sh 2>/dev/null || true
+  if [ "$full" -eq 1 ]; then
+    log "full: re-running install.sh ..."
+    "$REPO/install.sh" || die "install.sh failed — rollback with: $PROG rollback"
+  fi
+  if [ "$no_restart" -eq 0 ]; then
+    cmd_start || die "start failed after update — rollback with: $PROG rollback"
+    sleep 2
+    curl -s --max-time 5 "http://127.0.0.1:$API_PORT/health" >/dev/null \
+      || die "router /health failed after update — rollback with: $PROG rollback"
+    log "update done: $before → $after (prev saved, rollback available)"
+  else
+    log "update done (no restart): $before → $after"
+  fi
+}
+
+cmd_rollback() {
+  # Restore the pre-update HEAD saved by `update`, then restart + verify.
+  # Toggles: prev is swapped so rollback can flip back and forth.
+  local prev=""; [ -f "$DATA/update.prev" ] && prev="$(cat "$DATA/update.prev")"
+  [ -n "$prev" ] || die "no previous version recorded (no update run yet?)"
+  git -C "$REPO" rev-parse --verify "$prev" >/dev/null 2>&1 \
+    || die "previous commit $prev not found locally"
+  local cur; cur="$(repo_head)"
+  echo "$cur" >"$DATA/update.prev"
+  cmd_stop; sleep 1
+  git -C "$REPO" reset --hard "$prev" || die "reset failed"
+  chmod +x "$REPO/install.sh" "$REPO/archrouter" "$REPO/scripts/"*.sh 2>/dev/null || true
+  cmd_start || die "start failed after rollback"
+  sleep 2
+  curl -s --max-time 5 "http://127.0.0.1:$API_PORT/health" >/dev/null \
+    || die "router /health failed after rollback"
+  log "rollback done: $cur → $prev"
+}
+
 cmd_warp_setup() {
   # Idempotent: existing warp-a|b account dirs are kept (NEVER re-register
   # silently — that burns a new WARP device slot each time). Use --force to
@@ -272,9 +347,9 @@ cmd_warp_reset() {
 }
 
 case "${1:-help}" in
-  start|stop|restart|status|logs|doctor|version|warp-setup|warp-reset) ;;
+  start|stop|restart|status|logs|doctor|version|warp-setup|warp-reset|update|rollback) ;;
   help|-h|--help)
-    echo "Usage: $PROG start|stop|restart|status|logs [name]|warp-setup|warp-reset [a|b]|doctor|version"; exit 0 ;;
+    echo "Usage: $PROG start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|warp-setup|warp-reset [a|b]|doctor|version"; exit 0 ;;
   *) die "unknown command '$1' (try: $PROG help)" ;;
 esac
 
@@ -285,6 +360,8 @@ case "$cmd" in
   restart) cmd_stop; sleep 1; cmd_start "$@" ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
+  update) cmd_update "$@" ;;
+  rollback) cmd_rollback "$@" ;;
   doctor) cmd_doctor ;;
   version) cmd_version ;;
   warp-setup) cmd_warp_setup "$@" ;;

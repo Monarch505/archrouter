@@ -37,10 +37,17 @@ cd ~/archrouter && git fetch origin && git reset --hard origin/main \
 
 ```bash
 archrouter start | stop | restart | status | logs [router|pool|warp-a|warp-b]
+archrouter update [--check|--no-restart|--force|--full]  # self-update from GitHub + restart
+archrouter rollback                                       # restore pre-update version
 archrouter warp-setup [--force]   # idempotent; --force burns 2 new WARP slots
 archrouter warp-reset [a|b]       # bounce one backend (pool coordinator hook)
 archrouter doctor                 # env / ports / bins / upstream check
 ```
+
+`update` only touches the repo (`~/archrouter`) — `.env`, WARP accounts,
+DB, and logs in `~/.archrouter` are kept. `--full` also re-runs `install.sh`
+(use when binary versions change). Note: binary downgrade on rollback is not
+handled — re-run with `--full` if a rollback misbehaves.
 
 Config: `~/.archrouter/.env` (copied from `.env.example` on install;
 sourced automatically — `ARCHROUTER_MODE=warp` default).
