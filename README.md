@@ -46,5 +46,3 @@ Config: `~/.archrouter/.env` (copied from `.env.example` on install;
 sourced automatically — `ARCHROUTER_MODE=warp` default).
 Override per-invocation via env, e.g. `ARCHROUTER_MODE=none archrouter start`
 (direct, no WARP — use on UDP-filtered networks).
-
-Docs: `PLAN.md` `ARCHITECTURE.md` `PORTING.md` `PORTS-AND-ENV.md` `TASKS.md`.

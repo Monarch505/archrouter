@@ -3,6 +3,9 @@ data/
 .env
 bin/
 
+# internal planning docs (kept locally only, never pushed)
+docs-internal/
+
 # editor / OS
 .DS_Store
 *~
