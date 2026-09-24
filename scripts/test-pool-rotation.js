@@ -171,6 +171,21 @@ function check(name, cond, extra = "") {
     const rep2 = await post("/api/report", { event: "freeusagelimit", instance: "b" });
     const st3 = JSON.parse((await get("/")).body);
     check("explicit instance quarantine", rep2.code === 202 && st3.instances.find((i) => i.id === "b").quarantined);
+
+    // independent resets: b resetting must NOT block a's reset
+    const rep3 = await post("/api/report", { event: "forbidden", instance: "a" });
+    await sleep(1000);
+    const rep4 = await post("/api/report", { event: "forbidden", instance: "b" });
+    check("parallel resets: no 409 cross-block", rep3.code === 202 && rep4.code === 202,
+      `a=${rep3.code} b=${rep4.code}`);
+    let bothDone = false;
+    for (let i = 0; i < 60 && !bothDone; i++) {
+      await sleep(1000);
+      const st = JSON.parse((await get("/")).body);
+      const dones = st.events.filter((e) => e.type === "reset" && e.msg.startsWith("DONE")).map((e) => e.instance);
+      bothDone = dones.includes("a") && dones.includes("b");
+    }
+    check("both parallel resets DONE", bothDone);
   } catch (e) {
     check("no exception", false, e.message);
   } finally {

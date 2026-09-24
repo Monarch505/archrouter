@@ -140,7 +140,7 @@ const backends = backendDefs.map((d) => {
   const eq = d.indexOf("=");
   const id = d.slice(0, eq);
   const hp = splitHostPort(d.slice(eq + 1), 1080);
-  return { id, host: hp.host, port: hp.port, consecFails: 0, lastOk: 0, lastIp: null, lastReset: 0, quarantineUntil: 0, rr: true };
+  return { id, host: hp.host, port: hp.port, consecFails: 0, lastOk: 0, lastIp: null, lastReset: 0, lastResetAt: 0, resetting: false, quarantineUntil: 0, rr: true };
 });
 
 // host -> backend id that last served it (used to map 429/403 limit reports
@@ -294,9 +294,9 @@ setInterval(() => { for (const b of backends) void probeBackend(b); }, HEALTH_IN
 for (const b of backends) void probeBackend(b); // immediate first probe
 
 /* ---------------- reset coordinator ---------------- */
-
-let resetting = false;
-let lastResetAt = 0;
+/* Per-instance locks: a and b reset INDEPENDENTLY. When a is burned and
+ * resetting, b keeps serving (and vice versa) — the whole point of two
+ * backends. Cooldown is per-instance too. */
 
 function runHook(id) {
   return new Promise((resolve) => {
@@ -326,10 +326,10 @@ async function coordinatorReset(id, source) {
   const b = backends.find((x) => x.id === id);
   if (!b) return { code: 404, msg: `unknown instance ${id}` };
   if (!AUTO_RESET) return { code: 503, msg: "auto-reset disabled (direct-fallback active)" };
-  if (resetting) return { code: 409, msg: "reset already in progress" };
-  const gap = Date.now() - lastResetAt;
-  if (gap < MIN_RESET_GAP) return { code: 429, msg: `cooldown ${(MIN_RESET_GAP - gap) / 1000}s remaining`, retryAfter: Math.ceil((MIN_RESET_GAP - gap) / 1000) };
-  resetting = true;
+  if (b.resetting) return { code: 409, msg: `reset already in progress for ${id}`, retryAfter: 30 };
+  const gap = Date.now() - b.lastResetAt;
+  if (gap < MIN_RESET_GAP) return { code: 429, msg: `cooldown ${(MIN_RESET_GAP - gap) / 1000}s remaining for ${id}`, retryAfter: Math.ceil((MIN_RESET_GAP - gap) / 1000) };
+  b.resetting = true;
   event("reset", id, `START source=${source} currentIP=${b.lastIp}`);
   try {
     const hook = await runHook(id);
@@ -339,8 +339,8 @@ async function coordinatorReset(id, source) {
     }
     const v = await verifyBackend(b);
     totals.total_resets += 1;
-    lastResetAt = Date.now();
-    b.lastReset = lastResetAt;
+    b.lastResetAt = Date.now();
+    b.lastReset = b.lastResetAt;
     if (v.ok) {
       totals.success_count += 1;
       if (v.sameIp) totals.same_ip_count += 1;
@@ -351,7 +351,7 @@ async function coordinatorReset(id, source) {
     event("error", id, "verify FAILED after reset");
     return { code: 502, msg: "verify failed after reset" };
   } finally {
-    resetting = false;
+    b.resetting = false;
   }
 }
 
@@ -386,7 +386,7 @@ const api = http.createServer((req, res) => {
     return sendJson(res, 200, {
       instances: backends.map((b) => ({ id: b.id, running: Date.now() - b.lastOk < 2 * HEALTH_INTERVAL, public_ip: b.lastIp, consecFails: b.consecFails, quarantined: isQuarantined(b), lastReset: b.lastReset ? new Date(b.lastReset).toISOString() : null })),
       smart_reset: { ...totals, success_rate: totals.total_resets ? `${Math.round((100 * totals.success_count) / totals.total_resets)}%` : "n/a" },
-      resetting, events,
+      resetting: backends.some((b) => b.resetting), events,
     });
   }
   if (u.pathname === "/api/report" && req.method === "POST") {

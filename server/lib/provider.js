@@ -97,20 +97,30 @@ class OpenCodeProvider {
       return { status: s, message: msg, poolScoped: { reason: "ip-limit" } };
     }
     if (s === 403) {
-      // 403 inner-OpenCode WITHOUT limit marker: do NOT retry-spam.
-      // Cooldown 60s; repeated 403s inside a 3-minute episode extend it.
+      // 403 inner-OpenCode WITHOUT limit marker: v6.5 escalation.
+      // #1 → egress-refresh ONLY (new IP, identity kept — cheap, often enough).
+      // #2+ consecutive (same 3-min episode) → rotateIdentity + identity-refresh
+      //   + 60s cooldown (with streak backoff); in-cooldown hits → no-spin.
+      if (this.inCooldown(now)) {
+        return { status: s, message: msg, noRetry: true, waitMs: this.cooldownRemainingMs(now) };
+      }
       if (!this.episodeStart || now - this.episodeStart > episodeMs) {
         this.episodeStart = now;
         this.forbiddenStreak = 0;
       }
       this.forbiddenStreak += 1;
-      const extra = Math.min(this.forbiddenStreak - 1, 3) * 30000;
+      if (this.forbiddenStreak === 1) {
+        return { status: s, message: msg, poolScoped: { reason: "forbidden-egress" } };
+      }
+      const extra = Math.min(this.forbiddenStreak - 2, 3) * 30000;
       this.cooldownUntil = now + cooldownMs + extra;
+      this.rotateIdentity();
       return {
         status: s,
         message: msg,
-        poolScoped: { reason: "forbidden-cooldown" },
+        poolScoped: { reason: "forbidden-identity" },
         cooldownMs: this.cooldownUntil - now,
+        waitMs: this.cooldownUntil - now,
       };
     }
     return null;

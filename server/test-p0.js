@@ -42,13 +42,31 @@ ok("parseError 429+limit rotates identity", () => {
   assert.ok(r && r.poolScoped.reason === "ip-limit");
   assert.notStrictEqual(p.ocSession, before);
 });
-ok("parseError 403-no-limit starts cooldown, no identity spam", () => {
+ok("parseError 403-no-limit #1: egress-refresh only, identity kept", () => {
   const p = new OpenCodeProvider({});
   const before = p.ocSession;
   const r = p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
-  assert.ok(r && r.poolScoped.reason === "forbidden-cooldown");
+  assert.ok(r && r.poolScoped.reason === "forbidden-egress");
+  assert.strictEqual(p.ocSession, before);
+  assert.ok(!p.inCooldown());
+});
+ok("parseError 403-no-limit #2: identity-refresh + cooldown", () => {
+  const p = new OpenCodeProvider({});
+  const before = p.ocSession;
+  p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
+  const r = p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
+  assert.ok(r && r.poolScoped.reason === "forbidden-identity");
+  assert.notStrictEqual(p.ocSession, before);
   assert.ok(p.inCooldown());
   assert.ok(p.cooldownRemainingMs() > 50000);
+});
+ok("parseError 403 in-cooldown: noRetry, no spin", () => {
+  const p = new OpenCodeProvider({});
+  p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
+  p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
+  const before = p.ocSession;
+  const r = p.parseError(403, JSON.stringify({ error: { message: "inner OpenCode error" } }), { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 });
+  assert.ok(r && r.noRetry === true && !r.poolScoped);
   assert.strictEqual(p.ocSession, before);
 });
 

@@ -37,15 +37,18 @@ class Router {
 
   /**
    * Fire-and-forget limit report to the warp pool (:9190/api/report).
-   * The pool maps the event to a backend and runs the reset coordinator.
-   * Never blocks the retry loop (5s cap, errors only logged).
+   * The pool maps the event to the backend that served it, quarantines it
+   * (failover) and resets it in background. Returns a promise that resolves
+   * once the pool has ACKed (quarantine is applied synchronously before the
+   * pool responds) — callers SHOULD await it before retrying so the next
+   * attempt actually lands on the healthy backend. Never rejects.
    */
   reportPoolLimit(reason) {
     try {
-      if (this.proxyRouter.mode !== "warp") return;
+      if (this.proxyRouter.mode !== "warp") return Promise.resolve(false);
       const statusUrl = (this.config.proxy?.warp?.statusUrl || "http://127.0.0.1:9190").replace(/\/$/, "");
       const target = transport.parseUrl(statusUrl + "/api/report");
-      transport.doRequest({
+      return transport.doRequest({
         target, method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: reason }),
@@ -53,9 +56,11 @@ class Router {
       }).then(async (resp) => {
         const t = await resp.text().catch(() => "");
         logger.info(`[router] pool report ${reason} → ${resp.status} ${t.slice(0, 120)}`);
-      }).catch((e) => logger.warn(`[router] pool report failed: ${e.message}`));
+        return resp.status === 202 || resp.status === 200;
+      }).catch((e) => { logger.warn(`[router] pool report failed: ${e.message}`); return false; });
     } catch (e) {
       logger.warn(`[router] pool report setup failed: ${e.message}`);
+      return Promise.resolve(false);
     }
   }
 
@@ -280,14 +285,24 @@ class Router {
             `[attempt ${attempt}] limit hit (${resp.status}), rotated identity -> ${this.provider.ocSession}` +
             ` (poolScoped: ${JSON.stringify(lastError.poolScoped)})`
           );
-          // Usage-limit: rotate session AND mark this proxy/IP as exhausted so
-          // the next attempt uses a fresh IP (fallback rotation).
+          // Usage-limit: rotate session AND burn this egress IP (fallback rotation).
           if (proxy) this.proxyRouter.reportLimit(proxy);
-          // Warp-pool: fire-and-forget event to the reset coordinator.
-          if (lastError.poolScoped && lastError.poolScoped.reason === "ip-limit") {
-            this.reportPoolLimit("freeusagelimit");
-          } else {
-            this.reportPoolLimit("forbidden");
+          // Warp-pool: report + WAIT for the quarantine ACK before retrying,
+          // so the next attempt actually lands on the healthy backend while
+          // the burned one re-handshakes for a fresh IP in background.
+          const scope = lastError.poolScoped && lastError.poolScoped.reason;
+          if (lastError.noRetry) {
+            const waitMs = Math.min(lastError.waitMs || 60000, 120000);
+            logger.warn(`[attempt ${attempt}] in 403-cooldown, waiting ${Math.ceil(waitMs / 1000)}s`);
+            await new Promise((r) => setTimeout(r, waitMs));
+            if (attempt < retries) continue;
+          } else if (scope === "ip-limit") {
+            await this.reportPoolLimit("freeusagelimit");
+          } else if (scope === "forbidden-egress") {
+            await this.reportPoolLimit("forbidden");
+          } else if (scope === "forbidden-identity") {
+            await this.reportPoolLimit("forbidden");
+            // identity already rotated in parseError; loop-top waits out cooldown
           }
           this.logs.push({
             type: "rotation",
