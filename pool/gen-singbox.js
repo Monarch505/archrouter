@@ -73,12 +73,16 @@ async function main() {
   const addresses = ["172.16.0.2/32"];
   const cfg = {
     log: { level: "warning", output: path.join(dir, "sing-box.log") },
-    // NOTE: no `dns` block on purpose. sing-box 1.14 rejects our explicit
-    // dns server (FATAL "detour to an empty direct outbound"), and its
-    // built-in resolver ([::1]:53) doesn't exist on Termux. Instead the wg
-    // peer uses a literal IPv4 (resolved at generate time above), so the
-    // handshake needs zero DNS. Client lookups (api.ipify.org etc.) resolve
-    // through the tunnel once the handshake completes.
+    // DNS through the tunnel: WARP answers 1.1.1.1 inside the tunnel, so
+    // client hostnames (opencode.ai, api.ipify.org) resolve once the
+    // handshake completes. The route rule steers 1.1.1.1 via warp-ep (no
+    // detour field → avoids 1.14 "detour to an empty direct outbound"
+    // FATAL). Peer stays a literal IPv4 → handshake needs zero DNS.
+    // (No `address_resolver` needed: 1.1.1.1 is a literal IP.)
+    dns: {
+      servers: [{ tag: "cf", address: "1.1.1.1" }],
+      final: "cf",
+    },
     inbounds: [{ type: "socks", tag: "socks-in", listen: "127.0.0.1", listen_port: port }],
     outbounds: [{ type: "direct", tag: "direct" }],
     endpoints: [{
