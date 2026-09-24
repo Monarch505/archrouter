@@ -23,6 +23,16 @@ node ~/archrouter/scripts/e2e-chat.js
 archrouter status
 ```
 
+## Re-run / update (existing clone)
+
+`git pull` does not restore lost exec bits or discard local edits — use this
+instead (destroys local modifications, keeps `~/.archrouter` accounts + data):
+
+```bash
+cd ~/archrouter && git fetch origin && git reset --hard origin/main \
+  && chmod +x install.sh archrouter && ./install.sh --unattended
+```
+
 ## Daily use
 
 ```bash
