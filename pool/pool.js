@@ -30,7 +30,23 @@ const net = require("net");
 const http = require("http");
 const https = require("https");
 const tls = require("tls");
+const dns = require("dns");
 const { spawn } = require("child_process");
+
+// Resolve dst hostname via the OS resolver BEFORE dialing the warp backend.
+// sing-box inside the tunnel has no working resolver on this network (its
+// DNS queries ride route.final=warp-ep and come back REFUSED — proven
+// 2026-09-24: `lookup api.ipify.org: exchange4 REFUSED`, while system dig
+// works fine). So the pool does the resolution and passes an IPv4 literal
+// to the backend; SNI/Host upstream are unaffected (we only change the
+// SOCKS CONNECT target, not the TLS servername / HTTP Host).
+function resolveIPv4(host) {
+  if (/^[\d.]+$/.test(host)) return Promise.resolve(host);
+  return dns.promises.lookup(host, { family: 4 }).then(
+    (r) => r.address,
+    (e) => { throw new Error(`local resolve ${host}: ${e.message}`); }
+  );
+}
 
 function parseArgs(argv) {
   const o = { backends: [] };
@@ -63,29 +79,34 @@ process.on("unhandledRejection", (e) => { log(`FATAL unhandled rejection: ${e &&
 
 function socks5Connect(proxyHost, proxyPort, dstHost, dstPort, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
-    const sock = net.connect(proxyPort, proxyHost);
-    const timer = setTimeout(() => { sock.destroy(); reject(new Error("socks5 dial timeout")); }, timeoutMs);
-    const done = (err, s) => { clearTimeout(timer); err ? (sock.destroy(), reject(err)) : resolve(s); };
-    sock.once("error", (e) => done(e));
-    sock.once("connect", () => {
-      sock.write(Buffer.from([0x05, 0x01, 0x00])); // no-auth
-      let stage = 0, buf = Buffer.alloc(0);
-      sock.on("data", (c) => {
-        buf = Buffer.concat([buf, c]);
-        if (stage === 0 && buf.length >= 2) {
-          if (buf[0] !== 0x05 || buf[1] !== 0x00) return done(new Error("socks5 auth rejected"));
-          stage = 1; buf = Buffer.alloc(0);
-          const host = Buffer.from(dstHost, "utf8");
-          const req = Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, host.length]), host,
-            Buffer.from([(dstPort >> 8) & 0xff, dstPort & 0xff])]);
-          sock.write(req);
-        } else if (stage === 1 && buf.length >= 10) {
-          if (buf[1] !== 0x00) return done(Object.assign(new Error(`socks5 connect failed rep=${buf[1]}`), { rep: buf[1] }));
-          sock.removeAllListeners("data");
-          done(null, sock);
-        }
+    let sock = null;
+    let timer = null;
+    const done = (err, s) => { clearTimeout(timer); err ? (sock && sock.destroy(), reject(err)) : resolve(s); };
+    // Resolve locally first (see resolveIPv4): pass IP literal downstream.
+    resolveIPv4(dstHost).then((ip) => {
+      sock = net.connect(proxyPort, proxyHost);
+      timer = setTimeout(() => { sock.destroy(); reject(new Error("socks5 dial timeout")); }, timeoutMs);
+      sock.once("error", (e) => done(e));
+      sock.once("connect", () => {
+        sock.write(Buffer.from([0x05, 0x01, 0x00])); // no-auth
+        let stage = 0, buf = Buffer.alloc(0);
+        sock.on("data", (c) => {
+          buf = Buffer.concat([buf, c]);
+          if (stage === 0 && buf.length >= 2) {
+            if (buf[0] !== 0x05 || buf[1] !== 0x00) return done(new Error("socks5 auth rejected"));
+            stage = 1; buf = Buffer.alloc(0);
+            const ip4 = ip.split(".").map(Number);
+            const req = Buffer.from([0x05, 0x01, 0x00, 0x01, ip4[0], ip4[1], ip4[2], ip4[3],
+              (dstPort >> 8) & 0xff, dstPort & 0xff]);
+            sock.write(req);
+          } else if (stage === 1 && buf.length >= 10) {
+            if (buf[1] !== 0x00) return done(Object.assign(new Error(`socks5 connect failed rep=${buf[1]}`), { rep: buf[1] }));
+            sock.removeAllListeners("data");
+            done(null, sock);
+          }
+        });
       });
-    });
+    }).catch(reject);
   });
 }
 
@@ -271,7 +292,10 @@ async function probeBackend(b) {
     const r = await fetchViaSocks(b, HEALTH_URL, 10000);
     if (r.status >= 200 && r.status < 400) {
       b.consecFails = 0; b.lastOk = Date.now();
-      if (/^[\d.]+$/.test(r.body)) b.lastIp = r.body;
+      // HEALTH_URL may be a bare-IP endpoint (api.ipify.org) or a trace
+      // page (https://1.1.1.1/cdn-cgi/trace → "ip=1.2.3.4" lines).
+      const ipMatch = /^ip=([\d.]+)$/m.exec(r.body) || (/^[\d.]+$/.test(r.body.trim()) ? [null, r.body.trim()] : null);
+      if (ipMatch) b.lastIp = ipMatch[1];
       return true;
     }
     throw new Error(`status ${r.status}`);

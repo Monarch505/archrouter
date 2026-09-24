@@ -92,6 +92,13 @@ function post(p, obj) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Client traffic now reaches the backend as an IP literal (pool resolves
+// opencode.ai locally before dialing — see resolveIPv4 in pool.js), so count
+// every connection that is NOT the health probe (127.0.0.1).
+function served(tag) {
+  return Object.entries(counts[tag] || {}).filter(([h]) => h !== "127.0.0.1")
+    .reduce((n, [, v]) => n + v, 0);
+}
 let failures = 0;
 function check(name, cond, extra = "") {
   console.log(`${cond ? "PASS" : "FAIL"} ${name}${extra ? " — " + extra : ""}`);
@@ -126,7 +133,7 @@ function check(name, cond, extra = "") {
 
     // serve one request for opencode.ai through the pool (handshake only)
     await viaPool("opencode.ai", 443);
-    const svc = { a: counts.a["opencode.ai"] || 0, b: counts.b["opencode.ai"] || 0 };
+    const svc = { a: served("a"), b: served("b") };
     const servedBy = svc.a === 1 && svc.b === 0 ? "a" : svc.b === 1 && svc.a === 0 ? "b" : "?";
     check("request served via pool", servedBy !== "?", `svc=${JSON.stringify(svc)}`);
 
@@ -138,9 +145,9 @@ function check(name, cond, extra = "") {
     check("quarantined == serving backend", !!q && q.id === servedBy, `quarantined=${q && q.id} servedBy=${servedBy}`);
 
     // failover: next request must land on the OTHER backend
-    const before = { a: counts.a["opencode.ai"] || 0, b: counts.b["opencode.ai"] || 0 };
+    const before = { a: served("a"), b: served("b") };
     await viaPool("opencode.ai", 443);
-    const after = { a: counts.a["opencode.ai"] || 0, b: counts.b["opencode.ai"] || 0 };
+    const after = { a: served("a"), b: served("b") };
     const other = servedBy === "a" ? "b" : "a";
     check("failover to healthy backend", after[other] === before[other] + 1 && after[servedBy] === before[servedBy],
       `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
