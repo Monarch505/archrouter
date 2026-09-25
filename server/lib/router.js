@@ -178,8 +178,8 @@ class Router {
 
     // P0-3 OC_EMBED gate: canonical-14 ⊆ tool-names. Union stubs with client
     // tools on OpenAI-shape bodies only (never touch Anthropic messages bodies).
+    const hadTools = !isMessagesEndpoint && Array.isArray(body.tools) && body.tools.length > 0;
     if (!isMessagesEndpoint) {
-      const hadTools = Array.isArray(body.tools);
       body = { ...body, tools: unionWith(body.tools) };
       if (!hadTools) logger.info("[router] OC_EMBED stub14 attached (thin client, gate-safe)");
     }
@@ -195,7 +195,17 @@ class Router {
     // stream_options diverifikasi terhadap stream final — di sini upstream
     // selalu stream:true sehingga include_usage ikut terpasang → usage utuh
     // saat collapse). Tools sudah di-union di atas; enrich idempoten utk tools.
-    const finalBody = isMessagesEndpoint ? upstreamBody : enrich(upstreamBody);
+    let finalBody = isMessagesEndpoint ? upstreamBody : enrich(upstreamBody);
+    // GATE-FALLBACK: upstream menolak kombinasi stub14-tersuntik + system
+    // prompt tertentu (title-agent) dengan 403 FreeTierError, padahal body
+    // tanpa tools lolos. Untuk thin client (tools bukan milik klien) kita
+    // simpan varian tanpa tools dan otomatis turun kategori saat 403.
+    let strippedBody = null;
+    if (!isMessagesEndpoint && !hadTools) {
+      strippedBody = { ...finalBody };
+      delete strippedBody.tools;
+      delete strippedBody.tool_choice;
+    }
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       // P0-4 403-cooldown: wait out the cooldown instead of retry-spamming.
@@ -309,6 +319,17 @@ class Router {
               );
             }
           } catch {}
+        }
+        // GATE-FALLBACK: 403 pada thin-client dengan stub14 tersuntik → coba
+        // sekali lagi tanpa tools (title-agent lolos tanpa tools; chat biasa
+        // butuh stub → kalau ini juga 403, jatuh ke jalur cooldown biasa).
+        if (resp.status === 403 && strippedBody && finalBody !== strippedBody) {
+          logger.warn(
+            `[gate] 403 with injected stub14 on thin-client request → retry without tools ` +
+            `(model=${body.model} attempt=${attempt})`
+          );
+          finalBody = strippedBody;
+          continue;
         }
         lastError = this.provider.parseError(resp.status, errBody, {
           forbiddenCooldownMs: this.config.cooldown?.forbiddenCooldownMs ?? 60000,
