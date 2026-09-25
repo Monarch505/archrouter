@@ -46,6 +46,7 @@ async function handleMessages(router, req, res) {
       let chunkCount = 0;
       let contentChunks = 0;
       let finish = null;
+      let usageUpstream = null;
       let msgId = `msg_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`;
 
       const startPayload = { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: oai.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } };
@@ -65,25 +66,39 @@ async function handleMessages(router, req, res) {
           }
           const fr = j.choices?.[0]?.finish_reason;
           if (fr) finish = fr;
+          if (j.usage) usageUpstream = j.usage;
         },
         () => {}
       );
       const upstream = out.stream();
+      let closed = false;
+      const closeStream = () => { if (closed) return; closed = true; try { res.end(); } catch {} };
       upstream.on("data", (c) => parser.feed(c));
       upstream.on("end", () => {
         parser.end();
-        const stopReason = finish === "stop" ? "end_turn" : finish || "end_turn";
+        if (!finish) {
+          // Honest-close (v6.10): putus tanpa finish_reason → JANGAN mengarang
+          // end_turn; kirim error event, hentikan stream.
+          router.logs.push({ ...meta, status: out.status, chunks: chunkCount, finish: null, stream: true, interrupt: true });
+          logger.warn(`[${logId}] anthropic stream interrupted: no finish_reason chunks=${chunkCount}`);
+          res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message: "upstream closed without completion" } })}\n\n`);
+          closeStream();
+          return;
+        }
+        const stopReason = finish === "stop" ? "end_turn" : finish;
+        const outputTokens = usageUpstream?.completion_tokens ?? contentChunks;
         res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
-        res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: contentChunks } })}\n\n`);
+        res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
         res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
-        res.end();
+        closeStream();
         router.logs.push({ ...meta, status: out.status, chunks: chunkCount, finish, stream: true });
         logger.info(`[${logId}] anthropic stream done: status=${out.status} chunks=${chunkCount} finish=${finish}`);
       });
       upstream.on("error", (err) => {
         logger.error(`[${logId}] upstream stream error: ${err.message}`);
+        router.logs.push({ ...meta, status: out.status, chunks: chunkCount, finish, stream: true, error: err.message.slice(0, 200) });
         res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message: err.message } })}\n\n`);
-        res.end();
+        closeStream();
       });
       req.on("close", () => { try { upstream.destroy(); } catch {} });
       return;

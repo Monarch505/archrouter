@@ -33,8 +33,13 @@ function sendJson(res, status, obj) {
   res.end(payload);
 }
 
+/*
+ * REFERENCE v6.10 (honest-close): summarizeChunks menandai `complete` hanya
+ * bila finish_reason benar-benar terlihat. Stream putus tanpa finish_reason
+ * = abnormal end → wajib error/interrupt chunk, JANGAN mengarang finish.
+ */
 function summarizeChunks(events) {
-  const s = { total: 0, chunks: 0, done: 0, finish: null, usage: null, id: null, model: null };
+  const s = { total: 0, chunks: 0, done: 0, finish: null, usage: null, id: null, model: null, complete: false };
   for (const e of events) {
     s.total += 1;
     if (e.kind === "done") { s.done += 1; continue; }
@@ -47,7 +52,12 @@ function summarizeChunks(events) {
       if (fr) s.finish = fr;
     }
   }
+  s.complete = s.finish !== null;
   return s;
+}
+
+function interruptPayload(message) {
+  return JSON.stringify({ error: { message, type: "interrupt", code: "upstream_interrupt" } });
 }
 
 async function handleChatCompletions(router, req, res) {
@@ -91,19 +101,37 @@ async function handleChatCompletions(router, req, res) {
         () => events.push({ kind: "done" })
       );
       const upstream = out.stream();
+      let closed = false;
+      const closeStream = () => { if (closed) return; closed = true; try { res.end(); } catch {} };
       upstream.on("data", (c) => parser.feed(c));
       upstream.on("end", () => {
         parser.end();
-        res.write("data: [DONE]\n\n");
-        res.end();
         const s = summarizeChunks(events);
-        router.logs.push({ ...meta, status: out.status, chunks: s.chunks, finish: s.finish, usage: s.usage, stream: true });
-        logger.info(`[${logId}] stream done: status=${out.status} chunks=${s.chunks} finish="${s.finish}" proxy=${meta.proxy || "direct"} usage=${s.usage ? JSON.stringify(s.usage) : "-"}`);
+        if (s.complete) {
+          // Normal: finish_reason terlihat → [DONE] sekali, tutup bersih.
+          res.write("data: [DONE]\n\n");
+          closeStream();
+          router.logs.push({ ...meta, status: out.status, chunks: s.chunks, finish: s.finish, usage: s.usage, stream: true });
+          logger.info(`[${logId}] stream done: status=${out.status} chunks=${s.chunks} finish="${s.finish}" proxy=${meta.proxy || "direct"} usage=${s.usage ? JSON.stringify(s.usage) : "-"}`);
+        } else {
+          // Abnormal end (v6.10): putus TANPA finish_reason → interrupt chunk
+          // dulu, baru [DONE] (kontrak: [DONE] selalu terkirim tepat 1×).
+          res.write(`data: ${interruptPayload("upstream closed without completion")}\n\n`);
+          res.write("data: [DONE]\n\n");
+          closeStream();
+          router.logs.push({ ...meta, status: out.status, chunks: s.chunks, finish: null, usage: s.usage, stream: true, interrupt: true });
+          logger.warn(`[${logId}] stream interrupted: upstream ended without finish_reason chunks=${s.chunks} done=${s.done} proxy=${meta.proxy || "direct"} usage=${s.usage ? JSON.stringify(s.usage) : "-"}`);
+        }
       });
       upstream.on("error", (err) => {
-        logger.error(`[${logId}] upstream stream error: ${err.message}`);
+        parser.end();
+        const s = summarizeChunks(events);
+        // Error path: client HARUS melihat error, bukan close palsu bersih.
+        res.write(`data: ${JSON.stringify({ error: { message: err.message, type: "api_error", code: "upstream_error" } })}\n\n`);
         res.write("data: [DONE]\n\n");
-        res.end();
+        closeStream();
+        router.logs.push({ ...meta, status: out.status, chunks: s.chunks, finish: s.finish, usage: s.usage, stream: true, error: err.message.slice(0, 200) });
+        logger.error(`[${logId}] upstream stream error: ${err.message} chunks=${s.chunks}`);
       });
       req.on("close", () => { try { upstream.destroy(); } catch {} });
       return;
@@ -139,4 +167,4 @@ async function handleChatCompletions(router, req, res) {
   }
 }
 
-module.exports = { handleChatCompletions, parseBody, sendJson };
+module.exports = { handleChatCompletions, parseBody, sendJson, summarizeChunks, interruptPayload };
