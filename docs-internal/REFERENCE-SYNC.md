@@ -34,10 +34,10 @@
 | v6.7 | force-stream: client stream:false → upstream stream:true + collapse SSE → JSON | ✅ | `router.js` P0-2 + `Router.collapseSSE` | test-p0 P0-2 (reject empty = honest) |
 | v6.8 | union tanpa gerbang `<75` (always union missing-canonical, client-wins) | ✅ | `ocEmbed.js` unionWith selalu jalan | test-p0 P0-3 |
 | v6.9 | OC_EMBED 75 → stub14 (`oc-stub14.json`, "Do not call.") | ✅ | `ocEmbed.js` STUB_NAMES 14 | test-p0 P0-3 stub14 |
-| v6.10 | honest close: upstream kosong/cut → interrupt+error, TANPA forged finish | ✅ (collapse) / 🔶 (stream) | `collapseSSE` reject empty ✅; SSE relay path `sse.js`/`chatCompletions.js` belum honest-close penuh (P1-1) | test-p0 "reject empty" |
-| v6.11 | primer reasoning: effort absen → `{effort:"high",summary:"auto"}` utk responses models | ❌ | (P1-2) — hanya relevan utk /responses path | — |
+| v6.10 | honest close: upstream kosong/cut → interrupt+error, TANPA forged finish | ✅ | `collapseSSE` reject empty; SSE relay `chatCompletions.js` (complete/interrupt/error chunk + log) & `messages.js` (tanpa `end_turn` karangan); `responses.js` butuh terminal event; `[DONE]` selalu 1× | test-p0 honest-close (4) |
+| v6.11 | primer reasoning: effort absen → `{effort:"high",summary:"auto"}` utk responses models | ✅ (scope B) | `ocEmbed.js primer(body,kind)` — responses: reasoning obj; chat: `reasoning_effort:"high"` (keputusan user: kedua path); effort eksplisit dihormati, `xhigh\|max` clip | test-p0 primer (6) |
 | v6.12 | systemone branch: `/jev/i` → `/zen/v1/systemone`, passthrough+relay tanpa gate | 🔶 | `buildUrlFor("systemone")` ✅ tapi belum ada route/gate detect | — |
-| v5–v6 | responses converter (`rb`/`rssse`) utk muse family → `/zen/v1/responses` | ❌ | (P1-3) route `/v1/responses` belum | — |
+| v5–v6 | responses converter (`rb`/`rssse`) utk muse family → `/zen/v1/responses` | ✅ (ringan) | Route `/v1/responses` + `forward({kind:"responses"})` + `normalizeResponses` + `collapseResponsesSSE`; streaming relay verbatim. Bukan full converter (klien sudah Responses-shaped) | test-p0 normalize+collapse (6) |
 
 **Legend**: ✅ selesai · 🔶 sebagian · ❌ belum (terdaftar sebagai P1 di TASKS.md)
 
@@ -77,6 +77,10 @@
   (commit `b15b229`); verifikasi E2E **5/5 EXIT:0** (timeout 180).
 - 2026-09-25: debug snapshot body 403 dihapus (commit `1e54ac7`) — log `[gate]`
   dipertahankan utk observasi.
-- Sisa: P1 (honest-close stream, primer reasoning, responses/systemone route),
+- 2026-09-25: **Fase 4 (P1-1/2/3) dicangkok** — honest-close stream, primer
+  reasoning scope B (chat+responses, keputusan user), route `/v1/responses`
+  (translator ringan: normalize + collapse terminal-event-wajib).
+  Probe reasoning_tokens vs upstream masih PENDING (task terpisah).
+- Sisa: P1-4 (log console), systemone route (P2-1), probe reasoning_tokens,
   `x-opencode-request: msg_` (v6.3 🔶), deepseek-v4-flash-free mati di
   config pentestcode.

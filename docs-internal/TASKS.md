@@ -97,12 +97,18 @@
       config pentestcode); 429 `ip-limit` menumpuk bila kedua warp satu IP
 
 ## Fase 4 — Patch P1 + dashboard
-- [ ] P1-1 honest-close SSE (tanpa `[DONE]` palsu, usage tertangkap)
-- [ ] P1-2 reasoning primer (default effort high + summary auto)
-- [ ] P1-3 route `POST /v1/responses` → `/zen/v1/responses` (translator ringan)
+- [x] P1-1 honest-close SSE (tanpa `[DONE]` palsu, usage tertangkap) —
+      `chatCompletions.js` complete/interrupt/error; `messages.js` tanpa
+      `end_turn` karangan; `summarizeChunks.complete`, `interruptPayload`
+- [x] P1-2 reasoning primer (default effort high + summary auto) —
+      `ocEmbed.js primer()`, **scope B chat+responses** (keputusan user);
+      effort eksplisit dihormati, `xhigh|max`→`high`
+- [x] P1-3 route `POST /v1/responses` → `/zen/v1/responses` (translator
+      ringan: `normalizeResponses` + `collapseResponsesSSE` + relay verbatim)
 - [ ] P1-4 log console kaya + `archrouter logs`
 - [ ] Dashboard pangkas: status, pool, log (SSE), config, test box
 - [ ] Uji: muse-spark via `/v1/responses` 200; thinking-block muncul di log
+- [ ] Probe: `reasoning_tokens` chat dengan/ tanpa primer → bukti fix bekerja
 
 ## Fase 5 — E2E Linux + Termux
 - [ ] Matriks: {Ubuntu/Debian, Termux} × {direct, warp} × {chat stream/non-stream, messages, responses, models}

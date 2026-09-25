@@ -15,9 +15,9 @@ Legenda: ✅ sudah ada di opencode-router · ❌ belum · 🔶 ada tapi kurang t
 ## P1 (penting, Fase 4)
 | ID | Patch | Status kini | Kerja |
 |---|---|---|---|
-| P1-1 | Honest-close anti-fake-`[DONE]` (v6.10) | ❌ (perlu verifikasi `lib/sse.js`+relay) | SSE relay: teruskan chunk apa adanya; abnormal end (putus tanpa `finish_reason`) → tandai interrupt + balikan error, JANGAN tulis `[DONE]` palsu; tangkap `usage`. |
-| P1-2 | Reasoning primer (v6.11) | ❌ | Bila body tanpa `reasoning` → default `{effort:high, summary:auto}` (pola `rb()`). Validasi: thinking-block muncul, punt-rate turun. |
-| P1-3 | Endpoint `/responses` untuk muse-spark (kerja 2557) | ❌ (hanya chat+messages) | Route baru `POST /v1/responses` → forward `/zen/v1/responses` (body Response-API, bukan chat). Butuh translator request/response (ringan, bukan full 2557). |
+| P1-1 | Honest-close anti-fake-`[DONE]` (v6.10) | ✅ | SSE relay: chunk verbatim; abnormal end (tanpa `finish_reason`) → interrupt chunk + `[DONE]` sekali; upstream error → error chunk + log (bukan close palsu); `messages.js` tidak lagi mengarang `end_turn`; `summarizeChunks.complete` + `interruptPayload` diuji. |
+| P1-2 | Reasoning primer (v6.11, **scope B: chat+responses**) | ✅ | `primer(body, kind)` di `ocEmbed.js`: chat absen → `reasoning_effort:"high"`; responses absen → `{effort:"high", summary:"auto"}`; effort eksplisit klien (termasuk `"none"`) dihormati; `xhigh\|max` → clip `high` (pola `rb()`). |
+| P1-3 | Endpoint `/responses` untuk muse-spark (kerja 2557) | ✅ | Route `POST /v1/responses` → `routes/responses.js` → `forward({kind:"responses"})` → `/zen/v1/responses` (`buildUrlFor`), `Accept: */*`. Translator ringan: `normalizeResponses` (max_tokens→max_output_tokens, reasoning_effort→reasoning obj) + `collapseResponsesSSE` (terminal event wajib); streaming relay verbatim + honest-close. Bukan full 2557 (tanpa konversi chat↔responses). |
 | P1-4 | Console log kaya (timestamp, model, proxy, status, chunks, usage, rotasi) | 🔶 (logger dasar ada) | Format log satu baris per request + event rotasi/reset; `archrouter logs --tail`. |
 
 ## P2 (opsional, Fase 6)

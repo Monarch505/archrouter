@@ -5,7 +5,7 @@
 [CLIENT: opencode CLI / Kimi / Cline]
    │  POST :20399/v1/chat/completions  (OpenAI)
    │  POST :20399/v1/messages          (Anthropic)
-   │  POST :20399/v1/responses         (P1, untuk muse-spark)
+   │  POST :20399/v1/responses         (✅ P1-3, untuk muse-spark)
    │  GET  :20399/                     (dashboard)
    ▼
 [archrouter API :20399]  (Node, port dari opencode-router server.js)
@@ -37,7 +37,7 @@ monarch-router/
 │   ├── lib/                   # provider.js identifier.js transport.js router.js
 │   │                          # proxyPool.js(+warp mode) sse.js anthropic.js
 │   │                          # models.js store.js configStore.js requestLog.js logger.js
-│   ├── routes/                # chatCompletions.js messages.js responses.js(P1)
+│   ├── routes/                # chatCompletions.js messages.js responses.js(✅ P1-3)
 │   │                          # models.js dashboard.js
 │   └── web/index.html         # dashboard pangkas
 ├── pool/                      # warp-pool slim (Node): pool.js coordinator.js health.js api.js
