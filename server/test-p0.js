@@ -129,4 +129,125 @@ ok("collapseSSE rejects empty stream (no fake completion)", async () => {
   await assert.rejects(Router.collapseSSE(Readable.from(["data: [DONE]\n\n"]), "m"), /empty/);
 });
 
+// P1-1: honest-close — summarizeChunks.complete + interrupt payload
+const { summarizeChunks, interruptPayload } = require("./routes/chatCompletions.js");
+ok("honest-close: finish_reason terlihat → complete=true, usage tertangkap", () => {
+  const s = summarizeChunks([
+    { kind: "chunk", json: { id: "c1", model: "m", choices: [{ delta: { content: "x" }, finish_reason: "stop" }], usage: { completion_tokens: 5 } } },
+    { kind: "done" },
+  ]);
+  assert.strictEqual(s.complete, true);
+  assert.strictEqual(s.finish, "stop");
+  assert.deepStrictEqual(s.usage, { completion_tokens: 5 });
+});
+ok("honest-close: putus tanpa finish_reason → complete=false (wajib interrupt)", () => {
+  const s = summarizeChunks([
+    { kind: "chunk", json: { id: "c1", model: "m", choices: [{ delta: { content: "partial" } }] } },
+    { kind: "done" },
+  ]);
+  assert.strictEqual(s.complete, false);
+  assert.strictEqual(s.finish, null);
+});
+ok("honest-close: stream kosong → complete=false", () => {
+  assert.strictEqual(summarizeChunks([]).complete, false);
+});
+ok("honest-close: interruptPayload = error type interrupt, bukan finish palsu", () => {
+  const p = JSON.parse(interruptPayload("upstream closed without completion"));
+  assert.strictEqual(p.error.type, "interrupt");
+  assert.strictEqual(p.error.code, "upstream_interrupt");
+  assert.strictEqual(p.choices, undefined);
+});
+
+// P1-2: primer reasoning (v6.11 scope B — chat + responses, absent-only)
+ok("primer chat: effort absen → reasoning_effort high", () => {
+  const b = oc.primer({ messages: [] }, "chat");
+  assert.strictEqual(b.reasoning_effort, "high");
+});
+ok("primer chat: effort eksplisit klien dihormati (termasuk none)", () => {
+  assert.strictEqual(oc.primer({ reasoning_effort: "none" }, "chat").reasoning_effort, "none");
+  assert.strictEqual(oc.primer({ reasoning_effort: "low" }, "chat").reasoning_effort, "low");
+});
+ok("primer chat: xhigh|max di-clip ke high (pola reference)", () => {
+  assert.strictEqual(oc.primer({ reasoning_effort: "xhigh" }, "chat").reasoning_effort, "high");
+  assert.strictEqual(oc.primer({ reasoning_effort: "max" }, "chat").reasoning_effort, "high");
+});
+ok("primer responses: reasoning absen → {effort:high, summary:auto}", () => {
+  const b = oc.primer({ input: [] }, "responses");
+  assert.deepStrictEqual(b.reasoning, { effort: "high", summary: "auto" });
+});
+ok("primer responses: reasoning+effort klien utuh, summary diisi bila kosong", () => {
+  const b1 = oc.primer({ reasoning: { effort: "low" } }, "responses");
+  assert.deepStrictEqual(b1.reasoning, { effort: "low" });
+  const b2 = oc.primer({ reasoning: { summary: "detailed" } }, "responses");
+  assert.deepStrictEqual(b2.reasoning, { effort: "high", summary: "detailed" });
+});
+ok("primer: input tidak dimutasi + non-object passthrough", () => {
+  const orig = { messages: [] };
+  oc.primer(orig, "chat");
+  assert.strictEqual(orig.reasoning_effort, undefined);
+  assert.strictEqual(oc.primer(null, "chat"), null);
+  assert.deepStrictEqual(oc.primer([1], "responses"), [1]);
+});
+
+// P1-3: normalizeResponses (light translator, pola u() reference)
+ok("normalizeResponses: max_tokens/max_completion_tokens → max_output_tokens", () => {
+  const b = oc.normalizeResponses({ max_tokens: 500, input: [] });
+  assert.strictEqual(b.max_output_tokens, 500);
+  assert.strictEqual(b.max_tokens, undefined);
+  const b2 = oc.normalizeResponses({ max_output_tokens: 900, max_tokens: 500 });
+  assert.strictEqual(b2.max_output_tokens, 900); // sudah ada → menang
+  assert.strictEqual(b2.max_tokens, undefined);
+});
+ok("normalizeResponses: reasoning_effort → reasoning obj + summary auto; xhigh clip", () => {
+  const b = oc.normalizeResponses({ reasoning_effort: "xhigh", input: [] });
+  assert.deepStrictEqual(b.reasoning, { effort: "high", summary: "auto" });
+  assert.strictEqual(b.reasoning_effort, undefined);
+});
+ok("normalizeResponses: effort none → reasoning dihapus (jangan mikir)", () => {
+  const b = oc.normalizeResponses({ reasoning_effort: "none", input: [] });
+  assert.strictEqual(b.reasoning, undefined);
+  assert.strictEqual(b.reasoning_effort, undefined);
+});
+ok("normalizeResponses: effort klien utuh + summary diisi bila kosong", () => {
+  const b = oc.normalizeResponses({ reasoning: { effort: "low" }, input: [] });
+  assert.deepStrictEqual(b.reasoning, { effort: "low", summary: "auto" });
+});
+ok("normalizeResponses: tanpa effort → tidak disentuh (primer yang isi nanti)", () => {
+  const b = oc.normalizeResponses({ input: [] });
+  assert.strictEqual(b.reasoning, undefined);
+  assert.strictEqual(b.reasoning_effort, undefined);
+});
+
+// P1-3: collapseResponsesSSE (honest: terminal event wajib ada)
+ok("collapseResponsesSSE: deltas + response.completed → output_text + usage", async () => {
+  const chunks = [
+    'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+    'data: {"type":"response.output_text.delta","delta":"Hel"}\n\n',
+    'data: {"type":"response.output_text.delta","delta":"lo"}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output_text":"Hello","usage":{"input_tokens":3,"output_tokens":2}}}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const out = await Router.collapseResponsesSSE(Readable.from(chunks));
+  assert.strictEqual(out.id, "resp_1");
+  assert.strictEqual(out.output_text, "Hello");
+  assert.deepStrictEqual(out.usage, { input_tokens: 3, output_tokens: 2 });
+});
+ok("collapseResponsesSSE: putus tanpa terminal → reject (no karangan)", async () => {
+  const chunks = [
+    'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  await assert.rejects(Router.collapseResponsesSSE(Readable.from(chunks)), /without completion/);
+});
+ok("collapseResponsesSSE: response.failed → reject dengan pesan upstream", async () => {
+  const chunks = [
+    'data: {"type":"response.failed","response":{"error":{"message":"quota blown"}}}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  await assert.rejects(Router.collapseResponsesSSE(Readable.from(chunks)), /quota blown/);
+});
+ok("collapseResponsesSSE: stream kosong → reject", async () => {
+  await assert.rejects(Router.collapseResponsesSSE(Readable.from(["data: [DONE]\n\n"])), /empty|without completion/);
+});
+
 console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);

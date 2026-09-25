@@ -15,7 +15,7 @@ const transport = require("./transport.js");
 const sse = require("./sse.js");
 const logger = require("./logger.js");
 const { RequestLog } = require("./requestLog.js");
-const { unionWith, enrich } = require("./ocEmbed.js");
+const { unionWith, enrich, primer, normalizeResponses } = require("./ocEmbed.js");
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -70,8 +70,7 @@ class Router {
    * that asked stream:false receive assembled JSON. Never invents content:
    * empty stream → throws (caller maps to 502, not a fake completion).
    */
-  static collapseSSE(readable, fallbackModel) {
-    return new Promise((resolve, reject) => {
+  static collapseSSE(readable, fallbackModel) {    return new Promise((resolve, reject) => {
       let id = null, model = fallbackModel || null;
       let content = "", finishReason = null, usage = null, chunks = 0;
       const parser = sse.createParser(
@@ -103,6 +102,55 @@ class Router {
           choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: finishReason }],
           ...(usage ? { usage } : {}),
         });
+      });
+      readable.on("error", reject);
+    });
+  }
+
+  /**
+   * P1-3 (light responses translator): collapse Responses-API SSE → JSON.
+   * Kumpulkan output_text/refusal deltas; objek final diambil dari event
+   * terminal (response.completed/incomplete membawa response utuh; response.failed → reject).
+   * Putus tanpa terminal → reject (honest-close, tanpa karangan).
+   */
+  static collapseResponsesSSE(readable) {
+    return new Promise((resolve, reject) => {
+      let resp = null;
+      let text = "";
+      let usage = null;
+      let events = 0;
+      let failed = null;
+      const parser = sse.createParser(
+        (payload) => {
+          let obj;
+          try { obj = JSON.parse(payload); } catch { return; }
+          events += 1;
+          const t = obj.type;
+          if (t === "response.output_text.delta" || t === "response.refusal.delta") {
+            if (typeof obj.delta === "string") text += obj.delta;
+          } else if (t === "response.completed" || t === "response.incomplete") {
+            resp = obj.response || resp;
+            if (obj.response?.usage) usage = obj.response.usage;
+          } else if (t === "response.failed") {
+            failed = obj.response?.error?.message || obj.response?.error?.code || "response failed";
+          } else if (t === "error") {
+            failed = obj.error?.message || obj.message || "upstream error";
+          }
+        },
+        () => {}
+      );
+      readable.on("data", (c) => parser.feed(c));
+      readable.on("end", () => {
+        parser.end();
+        if (failed) return reject(new Error(failed));
+        if (!resp) return reject(new Error("upstream closed without completion (no terminal event)"));
+        const out = { ...resp };
+        if (typeof out.output_text === "string" || out.output === undefined) {
+          out.output_text = text;
+        }
+        if (usage) out.usage = usage;
+        if (events === 0) return reject(new Error("empty upstream stream (nothing to collapse)"));
+        resolve(out);
       });
       readable.on("error", reject);
     });
@@ -158,11 +206,15 @@ class Router {
   /**
    * Forward a request. Returns a response-like object for non-streaming, or a
    * streaming object for streaming.
-   *   options: { body, isMessagesEndpoint, timeoutMs, headersExtras }
+   *   options: { body, isMessagesEndpoint, kind, timeoutMs, headersExtras }
+   *   kind: "chat" (default) | "messages" | "responses" — menentukan URL
+   *   upstream (buildUrlFor), Accept header, dan apakah body kena pipeline
+   *   chat-specific (stub14/force-stream/enrich/GATE-FALLBACK).
    * Non-stream response: { status, json, raw }
    * Stream response:     { status, stream: () => node Readable, onChunk: (jsonChunk) => void }
    */
-  async forward({ body, isMessagesEndpoint = false, timeoutMs, headersExtras = {}, requireJson = true }) {
+  async forward({ body, isMessagesEndpoint = false, kind = "chat", timeoutMs, headersExtras = {}, requireJson = true }) {
+    const isResponses = kind === "responses";
     const retries = Math.max(1, this.config.retries || 1);
     const t0 = Date.now();
     let lastError = null;
@@ -177,15 +229,18 @@ class Router {
     }
 
     // P0-3 OC_EMBED gate: canonical-14 ⊆ tool-names. Union stubs with client
-    // tools on OpenAI-shape bodies only (never touch Anthropic messages bodies).
-    const hadTools = !isMessagesEndpoint && Array.isArray(body.tools) && body.tools.length > 0;
-    if (!isMessagesEndpoint) {
+    // tools on OpenAI-shape chat bodies only (never touch Anthropic messages
+    // bodies or Responses-API bodies — format tools-nya beda).
+    const hadTools = !isResponses && !isMessagesEndpoint && Array.isArray(body.tools) && body.tools.length > 0;
+    if (!isResponses && !isMessagesEndpoint) {
       body = { ...body, tools: unionWith(body.tools) };
       if (!hadTools) logger.info("[router] OC_EMBED stub14 attached (thin client, gate-safe)");
     }
 
     // P0-2 force-stream: upstream gate demands stream:true. Client asked
     // stream:false (or omitted) → send stream:true, collapse SSE to JSON.
+    // Berlaku juga utk responses (reference rb() selalu stream:true; event
+    // terminal response.completed membawa objek response utuh → collapse).
     const collapse = body.stream !== true;
     const upstreamBody = collapse ? { ...body, stream: true } : body;
     if (collapse) logger.info("[router] force-stream: client stream=false → upstream stream=true + collapse");
@@ -195,13 +250,22 @@ class Router {
     // stream_options diverifikasi terhadap stream final — di sini upstream
     // selalu stream:true sehingga include_usage ikut terpasang → usage utuh
     // saat collapse). Tools sudah di-union di atas; enrich idempoten utk tools.
-    let finalBody = isMessagesEndpoint ? upstreamBody : enrich(upstreamBody);
+    // P1-2 (primer reasoning, v6.11 scope B): setelah enrich, effort absen →
+    // diisi default high (chat: reasoning_effort, responses: reasoning obj).
+    let finalBody;
+    if (isResponses) {
+      finalBody = primer(normalizeResponses(upstreamBody), "responses");
+    } else if (isMessagesEndpoint) {
+      finalBody = upstreamBody;
+    } else {
+      finalBody = primer(enrich(upstreamBody), "chat");
+    }
     // GATE-FALLBACK: upstream menolak kombinasi stub14-tersuntik + system
     // prompt tertentu (title-agent) dengan 403 FreeTierError, padahal body
     // tanpa tools lolos. Untuk thin client (tools bukan milik klien) kita
     // simpan varian tanpa tools dan otomatis turun kategori saat 403.
     let strippedBody = null;
-    if (!isMessagesEndpoint && !hadTools) {
+    if (!isResponses && !isMessagesEndpoint && !hadTools) {
       strippedBody = { ...finalBody };
       delete strippedBody.tools;
       delete strippedBody.tool_choice;
@@ -221,12 +285,15 @@ class Router {
       const proxy = this.proxyRouter.nextProxy();
       const proxyStyle = this.proxyRouter.mode === "upstream" ? "forward"
         : this.proxyRouter.mode === "warp" ? "socks5" : "tunnel";
-      const headers = { ...this.provider.buildHeaders(), ...headersExtras };
-      const url = this.provider.buildUrl(isMessagesEndpoint);
+      const headers = { ...this.provider.buildHeaders(isResponses ? "*/*" : undefined), ...headersExtras };
+      const url = isResponses ? this.provider.buildUrlFor("responses")
+        : isMessagesEndpoint ? this.provider.buildUrl(true)
+        : this.provider.buildUrl(false);
       const proxyLabel = proxy ? proxy.replace(/^https?:\/\//, "") : "direct";
+      const pathLabel = isResponses ? "/zen/v1/responses" : isMessagesEndpoint ? "/zen/v1/messages" : "/zen/v1/chat/completions";
 
       logger.info(
-        `[attempt ${attempt}/${retries}] POST ${isMessagesEndpoint ? "/zen/v1/messages" : "/zen/v1/chat/completions"}` +
+        `[attempt ${attempt}/${retries}] POST ${pathLabel}` +
         ` model=${body.model} proxy=${proxyLabel} session=${this.provider.ocSession}`
       );
 
@@ -255,7 +322,9 @@ class Router {
           if (collapse) {
             // force-stream collapse: assemble SSE → single JSON for the client.
             try {
-              const json = await Router.collapseSSE(resp.stream(), body.model);
+              const json = isResponses
+                ? await Router.collapseResponsesSSE(resp.stream())
+                : await Router.collapseSSE(resp.stream(), body.model);
               return { status: 200, raw: JSON.stringify(json), json, provider: this.provider, proxy, latencyMs: Date.now() - t0, collapsed: true };
             } catch (e) {
               lastError = { status: 502, message: `collapse failed: ${e.message}` };
@@ -297,7 +366,7 @@ class Router {
         // untuk diff request gagal vs lolos gate (tools/stream/defaults).
         if (resp.status === 403 || resp.status === 429) {
           logger.warn(
-            `[gate] status=${resp.status} model=${body.model} path=${isMessagesEndpoint ? "messages" : "chat"}` +
+            `[gate] status=${resp.status} model=${body.model} path=${isResponses ? "responses" : isMessagesEndpoint ? "messages" : "chat"}` +
             ` tools=${Array.isArray(finalBody.tools) ? finalBody.tools.length : 0}` +
             ` stream=${finalBody.stream === true} max_tokens=${finalBody.max_tokens ?? "-"}` +
             ` tool_choice=${finalBody.tool_choice ?? "-"} stream_options=${finalBody.stream_options ? "set" : "-"}` +

@@ -10,6 +10,7 @@
  * Serves:
  *   POST /v1/chat/completions   (OpenAI, streaming + non-streaming)
  *   POST /v1/messages           (Anthropic)
+ *   POST /v1/responses          (OpenAI Responses API — muse-spark, P1-3)
  *   POST /v1/messages/count_tokens
  *   GET  /v1/models
  *   GET  /                       (browser dashboard)
@@ -25,6 +26,7 @@ const { ModelCache } = require("./lib/models.js");
 const { Router } = require("./lib/router.js");
 const { handleChatCompletions, parseBody, sendJson } = require("./routes/chatCompletions.js");
 const { handleMessages } = require("./routes/messages.js");
+const { handleResponses } = require("./routes/responses.js");
 const { handleModels } = require("./routes/models.js");
 const { handleDashboard } = require("./routes/dashboard.js");
 
@@ -108,6 +110,10 @@ async function main() {
       if (p === "/v1/messages" && req.method === "POST") {
         if (cfg.auth.requireAuth && !isAuthed(req, cfg.auth.apiKey)) return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
         return await handleMessages(router, req, res);
+      }
+      if (p === "/v1/responses" && req.method === "POST") {
+        if (cfg.auth.requireAuth && !isAuthed(req, cfg.auth.apiKey)) return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
+        return await handleResponses(router, req, res);
       }
       if (p === "/v1/messages/count_tokens" && req.method === "POST") {
         // Best-effort estimate; forward through opencode for accurate count when possible.
