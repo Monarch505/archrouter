@@ -94,7 +94,9 @@
       `1e54ac7`); v6.6 enrich `ca788ee`. E2E **5/5 EXIT:0** (timeout 180).
       Detail: `REFERENCE-SYNC.md` §Fakta gate + §Temuan
 - [ ] BELUM: claude models 401 (P1-3); `deepseek-v4-flash-free` mati (hapus dari
-      config pentestcode); 429 `ip-limit` menumpuk bila kedua warp satu IP
+      config pentestcode)
+- [x] **429 `ip-limit` menumpuk bila kedua warp satu IP** → P1-5 same-IP guard
+      (lihat "Fase 4 — P1-5" di bawah)
 
 ## Fase 4 — Patch P1 + dashboard
 - [x] P1-1 honest-close SSE (tanpa `[DONE]` palsu, usage tertangkap) —
@@ -105,6 +107,25 @@
       effort eksplisit dihormati, `xhigh|max`→`high`
 - [x] P1-3 route `POST /v1/responses` → `/zen/v1/responses` (translator
       ringan: `normalizeResponses` + `collapseResponsesSSE` + relay verbatim)
+- [x] **P1-5 same-egress-IP guard** (2026-09-25) — kuota 429 = per egress IP;
+      WARP memberi IP **per colo, bukan per akun** → dua akun bisa satu IP.
+      Invariant: dua akun TIDAK PERNAH di-serve pada satu egress IP.
+      - `pool.js` `reconcileIpUniqueness()`: tiap probe, grup(IP) electing
+        **keeper** ( healthiest, `ipSince` terlama) → sisanya **parked**
+      - `pickBackend()` serve-guard: parked keluar RR; fallback ke parked
+        hanya bila keeper-nya karantina/down (tetap 1 akun, traffic nyambung)
+      - `coordinatorReset(..., {untilDistinct:true})`: reset diulang sampai IP
+        baru ≠ IP sibling (`--distinct-retries` × `--distinct-retry-delay`);
+        habis retry → `same-ip-stuck` + parked
+      - `sweepParked()` tiap 10s: parked coba diverge lagi (`--park-retry-delay`)
+      - limit-report di IP bersama → **kedua** backend karantina + reset
+        (quota sibling ikut terbakar);-delay staggered
+      - status `:9190` tambah `ip_conflict`, `parked`, `parked` per-instance,
+        counter `park_count/unpark_count/conflict_resets/shared_ip_quarantines`
+      - flag: `--same-ip-guard 0` mematikan guard
+      - Test baru `scripts/test-pool-distinct-ip.js` **14/14 PASS** (collision
+        dipaksa, parked tak dilayani, diverge→unpark, shared-IP limit →
+        dua-duanya karantina)
 - [ ] P1-4 log console kaya + `archrouter logs`
 - [ ] Dashboard pangkas: status, pool, log (SSE), config, test box
 - [ ] Uji: muse-spark via `/v1/responses` 200; thinking-block muncul di log

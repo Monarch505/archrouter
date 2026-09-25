@@ -65,9 +65,15 @@
   di attempt 1; title lolos di attempt 2 (~1s).
 - Quirk: ada model (mis. space-bunny) lolos bahkan tanpa tools — gate
   tampaknya model-scoped; jangan jadikan alasan melepas union.
-- 429 `ip-limit` = kuota egress per-IP (bukan bug router); pool reset umumnya
-  ganti IP (`.130`→`.132/.133`) tapi kadang `same_ip_count` naik — kalau
-  kedua instance satu IP, 429 menumpuk sampai reset berikutnya.
+- 429 `ip-limit` = kuota egress **per-IP** (bukan bug router). Pool reset
+  umumnya ganti IP (`.130`→`.132/.133/.247.133`), tapi WARP memberi IP
+  **per colo, bukan per akun** → dua akun wgcf berbeda sering dapat IP yang
+  sama; kalau begitu keduanya kena 429 bersamaan dan failover ke "backend
+  sehat" justru mendarat di bucket quota yang sama terbakar.
+  **Bukti 2026-09-25:** `wgcf register` akun baru (device `e4388033`) tetap
+  egress `.215.130`; IP segar `.247.133` → 200 sementara `.130` → 429.
+  → lihat P1-5 same-IP guard di `pool/pool.js` (keeper + parked, reset
+  sampai IP beda, karantina berpasangan saat limit).
 
 ## Temuan / log perubahan
 
@@ -83,6 +89,14 @@
   **Probe reasoning: TERBUKTI** — primer high `reasoning_tokens:88` vs
   eksplisit low `23` (~4×); deploy `d9f2f35 → 5181307`, test-p0 32/32 remote,
   smoke `pentestcode run` EXIT:0.
+- 2026-09-25: **P1-5 same-egress-IP guard dicangkok** — kuota 429 proven
+  per-IP; WARP memberi IP per colo (bukan per akun) → invariant baru: dua
+  akun tak pernah di-serve pada satu egress IP. `pool.js`: `reconcileIpUniqueness`
+  (keeper election + parked), `pickBackend` serve-guard, reset `untilDistinct`
+  (`--distinct-retries/--distinct-retry-delay`), `sweepParked` re-diverge
+  (`--park-retry-delay`), limit-report → karantina **kedua** backend pada IP
+  yang sama, status `ip_conflict`/`parked`. Test baru
+  `scripts/test-pool-distinct-ip.js` 14/14 PASS; test-p0 32/32.
 - Sisa: P1-4 (log console), systemone route (P2-1), probe reasoning_tokens,
   `x-opencode-request: msg_` (v6.3 🔶), deepseek-v4-flash-free mati di
   config pentestcode.

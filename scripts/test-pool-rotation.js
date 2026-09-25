@@ -1,6 +1,11 @@
 "use strict";
 /* Test: 429/403 rotation — limit report quarantines the serving backend,
  * traffic fails over, background reset runs. All local, no internet needed.
+ *
+ * The fake backends answer the health probe themselves with a per-backend IP
+ * (a=1.1.1.1, b=2.2.2.2) so the same-IP guard stays ENABLED here: if both
+ * reported one IP the pool would park a backend and this test would measure
+ * the wrong thing.
  * Usage: node scripts/test-pool-rotation.js
  */
 const net = require("net");
@@ -11,6 +16,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const FAKE_A = 18010, FAKE_B = 18011, POOL = 18001, STATUS = 19090, HEALTH = 18901;
+const IP_OF = { a: "1.1.1.1", b: "2.2.2.2" }; // distinct egress IPs (guard invariant)
 const counts = { a: {}, b: {} }; // tag -> host -> n (health probes hit 127.0.0.1, client traffic hits opencode.ai)
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooltest-"));
 const hookLog = path.join(tmp, "hooks.txt");
@@ -36,6 +42,21 @@ function fakeBackend(port, tag) {
         else if (atyp === 3) { const n = buf[4]; if (buf.length < 5 + n + 2) return; host = buf.slice(5, 5 + n).toString(); portN = buf.readUInt16BE(5 + n); off = 5 + n + 2; }
         else { client.destroy(); return; }
         client.removeListener("data", onData);
+        // Health probe (127.0.0.1:HEALTH) is answered locally with this
+        // backend's own egress IP — no upstream dial, and never the same IP
+        // for a and b (that is the invariant under test elsewhere). The drop
+        // is delayed a beat: closing at once races the client's request write.
+        if (portN === HEALTH) {
+          const body = `${IP_OF[tag]}\n`;
+          client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+          setTimeout(() => {
+            try {
+              client.write(Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`));
+            } catch {}
+            setTimeout(() => { try { client.destroy(); } catch {} }, 200);
+          }, 50);
+          return;
+        }
         const up = net.connect(portN, host, () => {
           counts[tag][host] = (counts[tag][host] || 0) + 1;
           client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
