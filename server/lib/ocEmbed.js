@@ -66,4 +66,23 @@ function unionWith(clientTools) {
   return [...byName.values()];
 }
 
-module.exports = { STUB_NAMES, STUB_DESC, stub14, unionWith, toolName };
+/**
+ * REFERENCE-SYNC v6.6 (78223 ocEnrich, absent-only defaults) + v6.8 union:
+ * - tools: union canonical ∪ client (client-wins, tanpa gerbang <75)
+ * - max_tokens 32000 bila absen
+ * - stream_options {include_usage:true} bila stream:true & absen
+ * - tool_choice "auto" bila ada tools & absen
+ * Input tidak dimutasi; non-object/array/null → dikembalikan apa adanya.
+ */
+function enrich(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  let b = body;
+  const tools = unionWith(b.tools);
+  if (tools.length && tools !== b.tools) b = { ...b, tools };
+  if (b.max_tokens === undefined) b = { ...b, max_tokens: 32000 };
+  if (b.stream === true && b.stream_options === undefined) b = { ...b, stream_options: { include_usage: true } };
+  if (b.tools && b.tool_choice === undefined) b = { ...b, tool_choice: "auto" };
+  return b;
+}
+
+module.exports = { STUB_NAMES, STUB_DESC, stub14, unionWith, enrich, toolName };

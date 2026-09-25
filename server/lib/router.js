@@ -15,7 +15,7 @@ const transport = require("./transport.js");
 const sse = require("./sse.js");
 const logger = require("./logger.js");
 const { RequestLog } = require("./requestLog.js");
-const { unionWith } = require("./ocEmbed.js");
+const { unionWith, enrich } = require("./ocEmbed.js");
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -190,6 +190,13 @@ class Router {
     const upstreamBody = collapse ? { ...body, stream: true } : body;
     if (collapse) logger.info("[router] force-stream: client stream=false → upstream stream=true + collapse");
 
+    // REFERENCE-SYNC v6.6: absent-only enrich defaults applied to the body
+    // that actually goes upstream (reference: ocEnrich di transformRequest,
+    // stream_options diverifikasi terhadap stream final — di sini upstream
+    // selalu stream:true sehingga include_usage ikut terpasang → usage utuh
+    // saat collapse). Tools sudah di-union di atas; enrich idempoten utk tools.
+    const finalBody = isMessagesEndpoint ? upstreamBody : enrich(upstreamBody);
+
     for (let attempt = 1; attempt <= retries; attempt++) {
       // P0-4 403-cooldown: wait out the cooldown instead of retry-spamming.
       const waitMs = this.provider.cooldownRemainingMs();
@@ -218,14 +225,14 @@ class Router {
           target: transport.parseUrl(url),
           method: "POST",
           headers,
-          body: JSON.stringify(upstreamBody),
+          body: JSON.stringify(finalBody),
           proxy,
           proxyStyle,
           timeoutMs: timeoutMs ?? this.config.requestTimeoutMs ?? 120000,
         });
 
         if (resp.status >= 200 && resp.status < 300) {
-          if (upstreamBody.stream === true && !collapse) {
+          if (finalBody.stream === true && !collapse) {
             return {
               status: resp.status,
               stream: () => resp.stream(),
@@ -276,6 +283,17 @@ class Router {
         }
 
         const errBody = await resp.text();
+        // REFERENCE-SYNC debug: snapshot meta body upstream saat error — dipakai
+        // untuk diff request gagal vs lolos gate (tools/stream/defaults).
+        if (resp.status === 403 || resp.status === 429) {
+          logger.warn(
+            `[gate] status=${resp.status} model=${body.model} path=${isMessagesEndpoint ? "messages" : "chat"}` +
+            ` tools=${Array.isArray(finalBody.tools) ? finalBody.tools.length : 0}` +
+            ` stream=${finalBody.stream === true} max_tokens=${finalBody.max_tokens ?? "-"}` +
+            ` tool_choice=${finalBody.tool_choice ?? "-"} stream_options=${finalBody.stream_options ? "set" : "-"}` +
+            ` upstream="${String(errBody).slice(0, 200)}"`
+          );
+        }
         lastError = this.provider.parseError(resp.status, errBody, {
           forbiddenCooldownMs: this.config.cooldown?.forbiddenCooldownMs ?? 60000,
           episodeWindowMs: this.config.cooldown?.episodeWindowMs ?? 180000,

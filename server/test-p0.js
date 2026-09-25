@@ -88,6 +88,29 @@ ok("unionWith: stubs alone when no client tools; client wins on conflict", () =>
   assert.ok(u.find((t) => t.function.name === "custom"));
 });
 
+// REFERENCE-SYNC v6.6: enrich defaults (absent-only)
+ok("enrich: thin body → union 14 + max_tokens 32000 + tool_choice auto", () => {
+  const b = oc.enrich({ messages: [] });
+  assert.strictEqual(b.tools.length, 14);
+  assert.strictEqual(b.max_tokens, 32000);
+  assert.strictEqual(b.tool_choice, "auto");
+  assert.strictEqual(b.stream_options, undefined); // stream bukan true
+});
+ok("enrich: stream:true → stream_options include_usage; existing values untouched", () => {
+  const b = oc.enrich({ stream: true, max_tokens: 100, tool_choice: "none", tools: [] });
+  assert.deepStrictEqual(b.stream_options, { include_usage: true });
+  assert.strictEqual(b.max_tokens, 100);    // absent-only, jangan timpa
+  assert.strictEqual(b.tool_choice, "none");
+  assert.strictEqual(b.tools.length, 14);    // tetap di-union
+});
+ok("enrich: null/array passthrough + input tidak dimutasi", () => {
+  assert.strictEqual(oc.enrich(null), null);
+  assert.deepStrictEqual(oc.enrich([1]), [1]);
+  const orig = { messages: [] };
+  oc.enrich(orig);
+  assert.strictEqual(orig.max_tokens, undefined);
+});
+
 // P0-2: collapseSSE
 ok("collapseSSE assembles content + finish_reason + usage", async () => {
   const chunks = [
