@@ -305,20 +305,6 @@ class Router {
             `ua="${headers["User-Agent"] || "-"}" accept=${headers["Accept"] || "-"} proxy=${proxyLabel}` +
             ` upstream="${String(errBody).slice(0, 200)}"`
           );
-          // Snapshot body penuh (max 1/menit) untuk replay manual — diff field
-          // yang membedakan request 403 dari request 200.
-          try {
-            const fs = require("fs");
-            const now = Date.now();
-            const lastSnap = this._gateSnapAt || 0;
-            if (now - lastSnap > 60000) {
-              this._gateSnapAt = now;
-              fs.writeFileSync(
-                require("path").join(process.cwd(), `gate403-${now}.json`),
-                JSON.stringify({ headers, body: finalBody }, null, 2)
-              );
-            }
-          } catch {}
         }
         // GATE-FALLBACK: 403 pada thin-client dengan stub14 tersuntik → coba
         // sekali lagi tanpa tools (title-agent lolos tanpa tools; chat biasa
