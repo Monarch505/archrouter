@@ -80,7 +80,9 @@
 - 2026-09-25: **Fase 4 (P1-1/2/3) dicangkok** — honest-close stream, primer
   reasoning scope B (chat+responses, keputusan user), route `/v1/responses`
   (translator ringan: normalize + collapse terminal-event-wajib).
-  Probe reasoning_tokens vs upstream masih PENDING (task terpisah).
+  **Probe reasoning: TERBUKTI** — primer high `reasoning_tokens:88` vs
+  eksplisit low `23` (~4×); deploy `d9f2f35 → 5181307`, test-p0 32/32 remote,
+  smoke `pentestcode run` EXIT:0.
 - Sisa: P1-4 (log console), systemone route (P2-1), probe reasoning_tokens,
   `x-opencode-request: msg_` (v6.3 🔶), deepseek-v4-flash-free mati di
   config pentestcode.

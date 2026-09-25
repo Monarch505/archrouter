@@ -108,7 +108,9 @@
 - [ ] P1-4 log console kaya + `archrouter logs`
 - [ ] Dashboard pangkas: status, pool, log (SSE), config, test box
 - [ ] Uji: muse-spark via `/v1/responses` 200; thinking-block muncul di log
-- [ ] Probe: `reasoning_tokens` chat dengan/ tanpa primer → bukti fix bekerja
+- [x] Probe: `reasoning_tokens` chat — primer high → **88** vs eksplisit low →
+      **23** (~4×); upstream HORMATI `reasoning_effort`, primer terbukti aktif
+      (2026-09-25, host `.30`)
 
 ## Fase 5 — E2E Linux + Termux
 - [ ] Matriks: {Ubuntu/Debian, Termux} × {direct, warp} × {chat stream/non-stream, messages, responses, models}
