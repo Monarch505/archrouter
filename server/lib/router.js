@@ -291,10 +291,24 @@ class Router {
             ` tools=${Array.isArray(finalBody.tools) ? finalBody.tools.length : 0}` +
             ` stream=${finalBody.stream === true} max_tokens=${finalBody.max_tokens ?? "-"}` +
             ` tool_choice=${finalBody.tool_choice ?? "-"} stream_options=${finalBody.stream_options ? "set" : "-"}` +
-            ` session=${headers["x-opencode-session"] || "-"} request=${headers["x-opencode-request"] || "-"}` +
-            ` ua="${headers["User-Agent"] || "-"}" accept=${headers["Accept"] || "-"} proxy=${proxyLabel}` +
+            ` session=${headers["x-opencode-session"] || "-"} request=${headers["x-opencode-request"] || "-"} ` +
+            `ua="${headers["User-Agent"] || "-"}" accept=${headers["Accept"] || "-"} proxy=${proxyLabel}` +
             ` upstream="${String(errBody).slice(0, 200)}"`
           );
+          // Snapshot body penuh (max 1/menit) untuk replay manual — diff field
+          // yang membedakan request 403 dari request 200.
+          try {
+            const fs = require("fs");
+            const now = Date.now();
+            const lastSnap = this._gateSnapAt || 0;
+            if (now - lastSnap > 60000) {
+              this._gateSnapAt = now;
+              fs.writeFileSync(
+                require("path").join(process.cwd(), `gate403-${now}.json`),
+                JSON.stringify({ headers, body: finalBody }, null, 2)
+              );
+            }
+          } catch {}
         }
         lastError = this.provider.parseError(resp.status, errBody, {
           forbiddenCooldownMs: this.config.cooldown?.forbiddenCooldownMs ?? 60000,
