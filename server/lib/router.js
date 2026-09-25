@@ -291,6 +291,8 @@ class Router {
             ` tools=${Array.isArray(finalBody.tools) ? finalBody.tools.length : 0}` +
             ` stream=${finalBody.stream === true} max_tokens=${finalBody.max_tokens ?? "-"}` +
             ` tool_choice=${finalBody.tool_choice ?? "-"} stream_options=${finalBody.stream_options ? "set" : "-"}` +
+            ` session=${headers["x-opencode-session"] || "-"} request=${headers["x-opencode-request"] || "-"}` +
+            ` ua="${headers["User-Agent"] || "-"}" accept=${headers["Accept"] || "-"} proxy=${proxyLabel}` +
             ` upstream="${String(errBody).slice(0, 200)}"`
           );
         }
