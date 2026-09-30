@@ -21,13 +21,32 @@ const FAKE_A = Number(process.env.POOLTEST_A_PORT || 18010), FAKE_B = Number(pro
 // Ports are overridable because Windows moves its excluded port ranges around
 // (netsh "excludedportrange") — a hardcoded port can refuse to bind with
 // EACCES on one day and work the next. Pick a free range and pass it in.
-const IP_OF = { a: "1.1.1.1", b: "2.2.2.2" }; // distinct egress IPs (guard invariant)
 const counts = { a: {}, b: {} }; // tag -> host -> n (health probes hit 127.0.0.1, client traffic hits opencode.ai)
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooltest-"));
 const hookLog = path.join(tmp, "hooks.txt");
 const hookJs = path.join(tmp, "hook.js");
-fs.writeFileSync(hookJs, "require('fs').appendFileSync(process.argv[2], process.argv[3] + '\\n');\n");
+const ipMap = path.join(tmp, "ipmap.json");
+// Distinct egress IPs per backend, and a NEW one after every reset — that is
+// what a real bounce does. A fake that keeps returning the burned IP would make
+// the pool park the backend (correct behaviour, but then there is no DONE to
+// wait for), so the simulation has to move the IP like the real thing.
+const IP_START = { a: "1.1.1.1", b: "2.2.2.2" };
+const IP_FRESH = { a: "8.8.8.8", b: "9.9.9.9" };
+fs.writeFileSync(ipMap, JSON.stringify(IP_START));
 const hookPathArg = hookLog.replace(/\\/g, "\\\\");
+const ipMapArg = ipMap.replace(/\\/g, "\\\\");
+const freshArg = JSON.stringify(IP_FRESH);
+// The reset hook is executed by pool.js through a SHELL, so keep every
+// argument free of quotes/braces — cmd.exe mangles JSON blobs in a command line.
+// argv: [node, hook.js, <hookLog>, <id>, <ipMap>, <ipA>, <ipB>]
+fs.writeFileSync(hookJs, `
+const fs = require("fs");
+const id = process.argv[3];
+fs.appendFileSync(process.argv[2], id + "\\n");
+const m = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+m[id] = id === "a" ? process.argv[5] : process.argv[6];   // bounce -> new egress IP
+fs.writeFileSync(process.argv[4], JSON.stringify(m));
+`);
 
 function fakeBackend(port, tag) {
   const srv = net.createServer((client) => {
@@ -49,10 +68,11 @@ function fakeBackend(port, tag) {
         client.removeListener("data", onData);
         // Health probe (127.0.0.1:HEALTH) is answered locally with this
         // backend's own egress IP — no upstream dial, and never the same IP
-        // for a and b (that is the invariant under test elsewhere). The drop
-        // is delayed a beat: closing at once races the client's request write.
+        // for a and b (that is the invariant under test elsewhere). The IP
+        // changes after each reset (see IP_FRESH). The drop is delayed a beat:
+        // closing at once races the client's request write.
         if (portN === HEALTH) {
-          const body = `${IP_OF[tag]}\n`;
+          const body = `${JSON.parse(fs.readFileSync(ipMap, "utf8"))[tag]}\n`;
           client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
           setTimeout(() => {
             try {
@@ -140,9 +160,10 @@ function check(name, cond, extra = "") {
   const pool = spawn(process.execPath, ["pool/pool.js",
     "--listen", `127.0.0.1:${POOL}`, "--status-port", String(STATUS),
     "--backend", `a=127.0.0.1:${FAKE_A}`, "--backend", `b=127.0.0.1:${FAKE_B}`,
-    "--reset-hook", `node "${hookJs}" "${hookPathArg}" %ID%`,
+    "--reset-hook", `node "${hookJs}" "${hookPathArg}" %ID% "${ipMapArg}" ${IP_FRESH.a} ${IP_FRESH.b}`,
     "--health-url", `http://127.0.0.1:${HEALTH}/`,
     "--health-interval", "60", "--health-fail-thr", "3",
+    "--distinct-retries", "2", "--distinct-retry-delay", "1",
     "--min-reset-gap", "2", "--quarantine-secs", "6",
   ], { cwd: path.join(__dirname, ".."), stdio: ["ignore", "pipe", "pipe"] });
   let poolOut = "";
