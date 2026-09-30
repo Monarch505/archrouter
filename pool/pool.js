@@ -226,6 +226,22 @@ function conflictPartner(b) {
 function isHealthy(b) { return b.consecFails < HEALTH_FAIL_THR; }
 function hasIpConflict() { return backends.some((b) => !!conflictPartner(b)); }
 
+// Observability for the hard invariant: the RR-eligible set (parked excluded,
+// exactly what pickBackend L1 serves) must never contain two backends on one
+// egress IP. invariant_ok = null while no IP is known yet (boot/first probe);
+// false means the guard has not caught up and the caller (archrouter doctor,
+// CI) should treat it as a failure, not a warning.
+function invariantStatus() {
+  const serving = backends.filter((b) => !b.parked);
+  const known = serving.filter((b) => b.lastIp);
+  const ips = [...new Set(known.map((b) => b.lastIp))];
+  return {
+    serving: serving.map((b) => b.id),
+    serving_ips: ips,
+    invariant_ok: known.length === 0 ? null : known.length === ips.length,
+  };
+}
+
 function reconcileIpUniqueness(source) {
   if (!SAME_IP_GUARD) return;
   const groups = new Map();
@@ -563,6 +579,7 @@ const api = http.createServer((req, res) => {
       ip_conflict: hasIpConflict(),
       parked: backends.filter((b) => b.parked).map((b) => b.id),
       same_ip_guard: SAME_IP_GUARD,
+      ...invariantStatus(),
       smart_reset: { ...totals, success_rate: totals.total_resets ? `${Math.round((100 * totals.success_count) / totals.total_resets)}%` : "n/a" },
       resetting: backends.some((b) => b.resetting), events,
     });

@@ -181,6 +181,10 @@ async function waitFor(fn, secs = 40, step = 1000) {
     check("both probed with distinct IPs", new Set(ips0).size === 2, JSON.stringify(ips0));
     check("ip_conflict=false when distinct", st0.ip_conflict === false, JSON.stringify(st0.ip_conflict));
     check("nothing parked when distinct", st0.parked.length === 0, JSON.stringify(st0.parked));
+    check("invariant_ok=true when distinct", st0.invariant_ok === true, JSON.stringify(st0.invariant_ok));
+    check("serving/serving_ips exposed", Array.isArray(st0.serving) && st0.serving.length === 2
+      && Array.isArray(st0.serving_ips) && st0.serving_ips.length === 2,
+      `serving=${JSON.stringify(st0.serving)} ips=${JSON.stringify(st0.serving_ips)}`);
 
     // 2) force a collision: both backends now report the same egress IP
     writeIps({ a: "5.5.5.5", b: "5.5.5.5" });
@@ -191,6 +195,11 @@ async function waitFor(fn, secs = 40, step = 1000) {
     const keeperId = st1.instances.find((i) => i.id !== parkedId).id;
     check("parked flag visible per instance", st1.instances.find((i) => i.id === parkedId).parked === true
       && st1.instances.find((i) => i.id === keeperId).parked === false, `parked=${parkedId} keeper=${keeperId}`);
+    // The hard guarantee: even WHILE the IPs collide, the RR-eligible set holds
+    // exactly one account (the duplicate is parked) → invariant_ok stays true.
+    check("invariant_ok=true even during collision", st1.invariant_ok === true
+      && st1.serving.length === 1 && st1.serving_ips.length === 1,
+      `invariant_ok=${JSON.stringify(st1.invariant_ok)} serving=${JSON.stringify(st1.serving)} ips=${JSON.stringify(st1.serving_ips)}`);
 
     // 3) parked backend is never served while the IPs collide
     const before = { ...counts };

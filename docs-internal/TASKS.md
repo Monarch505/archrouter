@@ -77,9 +77,13 @@
       SEBELUM dial backend → sing-box terima ATYP=IPv4 literal; probe parse `ip=`
       dari body trace. `test-pool-rotation.js` diadaptasi (count by served()).
       Test: 11/11 + 10/10 PASS. Push `e3a8934` → `archrouter update` remote OK
-- [x] Anti-collision IP: root cause = restart serempak → handshake serentak →
-      pool CGNAT datacenter sama. Recipe: staggered `warp-reset a` → sleep 8 →
-      `warp-reset b` → sleep 12 → probe (`a≠b` attempt 1)
+- [~] Anti-collision IP — ~~root cause = restart serempak → handshake serentak~~ **DIREVISI
+      2026-09-30 (Gate 0)**: start serempak justru distinct **3/3** → hipotesis "serempak =
+      IP sama" **GUGUR**. Yang benar: egress IP datang dari **pool per colo** (bukan per akun),
+      sehingga **kolisi bersifat acak**; bounce berturut pun masih sering sama. Pool colo SIN
+     observed **6 IP unik**. Jaminan "tak pernah sama" karena itu harus dari **verify+retry**
+      (guard P1-5), bukan config statis maupun timing stagger. Bukti + angka lengkap:
+      `WINDOWS-BACKBONE-PROOF.md`; alat ukur `scripts/warp-ip-matrix.ps1`.
 - [x] Bukti akhir: loop 10x via `:11801` = 2 IP unik 5/5 split semua `warp=on`;
       E2E 3 model 200 (space-bunny / ling-3.0-flash-fin / nemotron-3.5-lightning);
       `direct_fallback=0`; events `serve a/b`; rotasi 429 terekam sempurna

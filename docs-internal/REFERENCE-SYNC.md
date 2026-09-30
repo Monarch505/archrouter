@@ -65,15 +65,18 @@
   di attempt 1; title lolos di attempt 2 (~1s).
 - Quirk: ada model (mis. space-bunny) lolos bahkan tanpa tools — gate
   tampaknya model-scoped; jangan jadikan alasan melepas union.
-- 429 `ip-limit` = kuota egress **per-IP** (bukan bug router). Pool reset
-  umumnya ganti IP (`.130`→`.132/.133/.247.133`), tapi WARP memberi IP
-  **per colo, bukan per akun** → dua akun wgcf berbeda sering dapat IP yang
-  sama; kalau begitu keduanya kena 429 bersamaan dan failover ke "backend
-  sehat" justru mendarat di bucket quota yang sama terbakar.
-  **Bukti 2026-09-25:** `wgcf register` akun baru (device `e4388033`) tetap
-  egress `.215.130`; IP segar `.247.133` → 200 sementara `.130` → 429.
-  → lihat P1-5 same-IP guard di `pool/pool.js` (keeper + parked, reset
-  sampai IP beda, karantina berpasangan saat limit).
+- 429 `ip-limit` = kuota egress **per-IP** (bukan bug router). Egress IP WARP datang dari
+  **pool per colo**, bukan per akun → dua akun bisa dapat IP yang sama; kalau begitu keduanya
+  kena 429 bersamaan dan failover ke "backend sehat" justru mendarat di bucket yang sama
+  terbakar. **Bukti 2026-09-25:** `wgcf register` akun baru (device `e4388033`) tetap egress
+  `.215.130`. **Bukti 2026-09-30 (Windows native, Gate 0):** start serempak distinct 3/3
+  (hipotesis "serempak = IP sama" gugur), bounce-one konvergen 6/6 (avg 2,17 tries), pool
+  colo SIN = 6 IP unik.
+  → **jawaban atas "pakai Lever apa?"**: TIDAK ada lever statis. Daftar akun baru = IP sama;
+  port 500/4500 = pool sama; peer `162.159.193.1` = tunnel mati. Yang benar =
+  **verify + retry** (guard P1-5: probe → park yang duplikat → bounce sampai beda → unpark),
+  dengan `invariant_ok` di `:9190` sebagai bukti yang bisa diverifikasi kapan pun.
+  Detail: `WINDOWS-BACKBONE-PROOF.md`.
 
 ## Temuan / log perubahan
 

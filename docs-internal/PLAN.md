@@ -1,10 +1,16 @@
 # monarch-router — PLAN (master)
 
 ## 1. Tujuan
-Satu aplikasi compact, plug-and-play, untuk **Linux dan Termux**, satu perintah runnable:
-`archrouter`. Isinya: opencode-router (hanya model opencode, bukan semua provider 9router)
-+ proxy-pool + warpy-pool (diadopsi metodenya, **tanpa** GUI desktop) + patch fix penting
-dari 9router-fix. Windows **nanti dulu** — semua path/env/port ditulis untuk Linux/Termux.
+Satu aplikasi compact, plug-and-play, untuk **Linux, Termux, dan Windows (native)**, satu
+perintah runnable: `archrouter`. Isinya: opencode-router (hanya model opencode, bukan semua
+provider 9router) + proxy-pool + warpy-pool (diadopsi metodenya, **tanpa** GUI desktop) +
+patch fix penting dari 9router-fix.
+
+> **Status Windows (2026-09-30):** bukan lagi "nanti dulu" — **Gate 0 LOLOS**. WARP userspace
+> jalan native Windows tanpa TUN/admin, 2 akun dengan IP berbeda terbukti, dan
+> `pool/gen-singbox.js` jalan **tanpa diubah**. Runtime + installer lintas-OS ada di Gate 1
+> (`archrouter.mjs` + `install.mjs`, bash jadi shim). Bukti: `WINDOWS-BACKBONE-PROOF.md`.
+> Tanpa Docker di semua platform — `wgcf` + `sing-box` native.
 
 ## 2. Sumber yang dipakai
 | Sumber | Yang diambil |

@@ -9,13 +9,18 @@
  */
 
 const path = require("path");
+const os = require("os");
 const { DatabaseSync } = require("node:sqlite");
 
 // DB lives in <base>/data/archrouter.db (plug-and-play, repo stays clean).
-// <base> = $ARCHROUTER_HOME or $HOME/.archrouter. Fallback: repo dir (dev).
+// <base> = $ARCHROUTER_HOME or <home>/.archrouter. Fallback: repo dir (dev).
+// HOME_DIR: $HOME on unix; on Windows HOME is usually NOT set, so fall back to
+// os.homedir() (USERPROFILE) — otherwise the DB lands inside the git repo.
+// Proven 2026-09-30 (native Windows spike): HOME empty -> data/ inside repo.
+const HOME_DIR = process.env.HOME || (() => { try { return os.homedir(); } catch { return null; } })();
 const BASE_DIR =
   process.env.ARCHROUTER_HOME ||
-  (process.env.HOME ? path.join(process.env.HOME, ".archrouter") : null) ||
+  (HOME_DIR ? path.join(HOME_DIR, ".archrouter") : null) ||
   path.join(__dirname, "..");
 const DATA_DIR = BASE_DIR === path.join(__dirname, "..")
   ? BASE_DIR
