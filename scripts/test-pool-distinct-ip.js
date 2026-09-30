@@ -234,6 +234,28 @@ async function waitFor(fn, secs = 40, step = 1000) {
     check("both backends quarantined (same IP)", q3.length === 2, `quarantined=${JSON.stringify(q3)} msg=${rep.body}`);
     check("shared_ip_quarantines counted", st3.smart_reset.shared_ip_quarantines >= 1, JSON.stringify(st3.smart_reset));
 
+    // 6) a limit event must not hand the burned IP back. Live bug 2026-09-30:
+    //    429 on .130 -> reset -> .130 again -> DONE (quota already spent there).
+    //    The reset must retry until the IP differs from the burned one.
+    const burned = "4.4.4.4";
+    writeIps({ a: burned, b: "7.7.7.7" });
+    await waitFor((st) => st.instances.find((i) => i.id === "a").public_ip === burned);
+    const rep2 = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+    check("limit report → 202", rep2.code === 202, rep2.body);
+    // The hook gives a FRESH ip for a, so the reset should end on FRESH.a (8.8.8.8),
+    // never back on the burned 4.4.4.4.
+    let stB = null;
+    for (let i = 0; i < 25; i++) {
+      await sleep(1000);
+      stB = JSON.parse((await get("/")).body);
+      const a = stB.instances.find((x) => x.id === "a").public_ip;
+      if (a && a !== burned) break;
+    }
+    const ipAfter = stB.instances.find((x) => x.id === "a").public_ip;
+    check("reset after 429 lands on a NEW ip (never the burned one)", !!ipAfter && ipAfter !== burned,
+      `burned=${burned} now=${ipAfter}`);
+    check("burned-IP retry counted", stB.smart_reset.conflict_resets >= 1, JSON.stringify(stB.smart_reset));
+
     // 6) invariant holds overall: no moment with two backends served on one IP
     const stF = await waitFor((st) => st.instances.every((i) => i.public_ip) && new Set(st.instances.map((i) => i.public_ip)).size === 2, 40);
     const ipsF = stF.instances.map((i) => i.public_ip);

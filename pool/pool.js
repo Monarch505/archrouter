@@ -492,6 +492,11 @@ async function coordinatorReset(id, source, opts = {}) {
   const gap = Date.now() - b.lastResetAt;
   if (gap < MIN_RESET_GAP) return { code: 429, msg: `cooldown ${(MIN_RESET_GAP - gap) / 1000}s remaining for ${id}`, retryAfter: Math.ceil((MIN_RESET_GAP - gap) / 1000) };
   const untilDistinct = !!opts.untilDistinct && SAME_IP_GUARD;
+  // IP we must NOT come back with. Set for usage-limit resets: that egress IP
+  // just burned its quota, so re-handshaking onto it again is a wasted round
+  // trip (observed live 2026-09-30: 429 on .130 → reset → .130 again → DONE,
+  // which un-serves the same burned bucket). Verified by test-pool-distinct-ip.
+  const avoidIp = SAME_IP_GUARD ? (opts.avoidIp || null) : null;
   const maxAttempts = untilDistinct ? DISTINCT_RETRIES : 1;
   b.resetting = true;
   const ipBefore = b.lastIp;
@@ -511,12 +516,16 @@ async function coordinatorReset(id, source, opts = {}) {
       b.lastResetAt = Date.now();
       b.lastReset = b.lastResetAt;
       if (v.ok) {
-        // Invariant: two accounts must never share an egress IP. If the fresh
-        // handshake landed on the sibling's IP, retry instead of accepting it.
+        // Invariant: two accounts must never share an egress IP, and a limit
+        // event must never hand us back the IP that just burned. If the fresh
+        // handshake lands on a forbidden IP, retry instead of accepting it.
         const partner = conflictPartner(b);
-        if (partner && untilDistinct) {
+        const onBurned = avoidIp && v.ip === avoidIp;
+        if ((partner || onBurned) && untilDistinct) {
           totals.conflict_resets += 1;
-          event("same-ip", id, `post-reset IP ${v.ip} still shared with ${partner.id} (attempt ${attempt}/${maxAttempts})`);
+          event("same-ip", id, onBurned
+            ? `post-reset IP ${v.ip} is the burned one (attempt ${attempt}/${maxAttempts})`
+            : `post-reset IP ${v.ip} still shared with ${partner.id} (attempt ${attempt}/${maxAttempts})`);
           if (attempt < maxAttempts) {
             // Let the sibling keep the slot; only one tunnel bounces at a time.
             await sleep(DISTINCT_RETRY_DELAY);
@@ -524,9 +533,11 @@ async function coordinatorReset(id, source, opts = {}) {
           }
           b.parked = true; b.parkedAt = Date.now();
           b.retryAt = Date.now() + PARK_RETRY_DELAY;
-          event("same-ip-stuck", id, `still ${v.ip} after ${maxAttempts} attempts → parked, retry in ${Math.round(PARK_RETRY_DELAY / 1000)}s`);
+          event("same-ip-stuck", id, onBurned
+            ? `still on burned ${v.ip} after ${maxAttempts} attempts → parked, retry in ${Math.round(PARK_RETRY_DELAY / 1000)}s`
+            : `still ${v.ip} (shared with ${partner.id}) after ${maxAttempts} attempts → parked, retry in ${Math.round(PARK_RETRY_DELAY / 1000)}s`);
           reconcileIpUniqueness(`reset:${id}`);
-          return { code: 202, msg: `parked: egress IP ${v.ip} shared with ${partner.id}`, ip: v.ip };
+          return { code: 202, msg: onBurned ? `parked: still on burned IP ${v.ip}` : `parked: egress IP ${v.ip} shared with ${partner.id}`, ip: v.ip };
         }
         totals.success_count += 1;
         if (v.sameIp) totals.same_ip_count += 1;
@@ -603,7 +614,7 @@ const api = http.createServer((req, res) => {
         b.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
         event("quarantine", b.id, `excluded from RR for ${QUARANTINE_SECS}s (limit event)`);
         if (AUTO_RESET) {
-          coordinatorReset(b.id, "api-limit", { untilDistinct: true }).then((r) => {
+          coordinatorReset(b.id, "api-limit", { untilDistinct: true, avoidIp: burnedIp }).then((r) => {
             if (r.code !== 200 && r.code !== 202) log(`[coordinator] background reset ${b.id}: ${r.code} ${r.msg}`);
           });
         }
@@ -618,7 +629,7 @@ const api = http.createServer((req, res) => {
           event("quarantine", t.id, `shares burned IP ${burnedIp} with ${b.id} → also excluded for ${QUARANTINE_SECS}s`);
           if (AUTO_RESET) {
             setTimeout(() => {
-              coordinatorReset(t.id, "shared-ip", { untilDistinct: true }).then((r) => {
+              coordinatorReset(t.id, "shared-ip", { untilDistinct: true, avoidIp: burnedIp }).then((r) => {
                 if (r.code !== 200 && r.code !== 202) log(`[coordinator] shared-ip reset ${t.id}: ${r.code} ${r.msg}`);
               });
             }, DISTINCT_RETRY_DELAY);
