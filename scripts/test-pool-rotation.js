@@ -15,7 +15,12 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
-const FAKE_A = 18010, FAKE_B = 18011, POOL = 18001, STATUS = 19090, HEALTH = 18901;
+const FAKE_A = Number(process.env.POOLTEST_A_PORT || 18010), FAKE_B = Number(process.env.POOLTEST_B_PORT || 18011),
+      POOL = Number(process.env.POOLTEST_POOL_PORT || 18001), STATUS = Number(process.env.POOLTEST_STATUS_PORT || 19090),
+      HEALTH = Number(process.env.POOLTEST_HEALTH_PORT || 18901);
+// Ports are overridable because Windows moves its excluded port ranges around
+// (netsh "excludedportrange") — a hardcoded port can refuse to bind with
+// EACCES on one day and work the next. Pick a free range and pass it in.
 const IP_OF = { a: "1.1.1.1", b: "2.2.2.2" }; // distinct egress IPs (guard invariant)
 const counts = { a: {}, b: {} }; // tag -> host -> n (health probes hit 127.0.0.1, client traffic hits opencode.ai)
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooltest-"));

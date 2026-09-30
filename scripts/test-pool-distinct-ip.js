@@ -17,7 +17,12 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 // NB: avoid 18005-18104 / 19211-19310 — Windows excluded port ranges.
-const FAKE_A = 28020, FAKE_B = 28021, POOL = 28002, STATUS = 29091, HEALTH = 28902;
+// Ports are overridable because Windows moves those ranges around (netsh
+// "excludedportrange"), so a hardcoded port can refuse to bind with EACCES on
+// one day and work the next.
+const FAKE_A = Number(process.env.POOLDIST_A_PORT || 28020), FAKE_B = Number(process.env.POOLDIST_B_PORT || 28021),
+      POOL = Number(process.env.POOLDIST_POOL_PORT || 28002), STATUS = Number(process.env.POOLDIST_STATUS_PORT || 29091),
+      HEALTH = Number(process.env.POOLDIST_HEALTH_PORT || 28902);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooldistinct-"));
 const ipMap = path.join(tmp, "ipmap.json");
 const hookLog = path.join(tmp, "hooks.txt");
