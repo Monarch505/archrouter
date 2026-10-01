@@ -6,6 +6,7 @@
 
 const transport = require("./transport.js");
 const logger = require("./logger.js");
+const { capsFor } = require("./modelCaps.js");
 
 class ModelCache {
   constructor(config) {
@@ -38,20 +39,24 @@ class ModelCache {
             object: "model",
             owned_by: "combo",
           }));
+          // Models upstream marks unavailable are dropped from the catalog so
+          // clients stop offering them.
+          const upstream = resp.json.data.filter((m) => capsFor(m.id).kind !== "unavailable");
           this.data = {
             fetchedAt: new Date().toISOString(),
-            count: resp.json.data.length + comboData.length,
-            raw: resp.json.data.map((m) => m.id),
+            count: upstream.length + comboData.length,
+            raw: upstream.map((m) => m.id),
             openai: {
               object: "list",
               data: [
-                ...resp.json.data.map((m) => ({
+                ...upstream.map((m) => ({
                   id: `${prefix}${m.id}`,
                   object: m.object || "model",
                   created: m.created,
                   owned_by: m.owned_by || "opencode",
+                  capabilities: capsFor(m.id),
                 })),
-                ...comboData,
+                ...comboData.map((c) => ({ ...c, capabilities: { kind: "chat", reasoning: false, efforts: [] } })),
               ],
             },
           };

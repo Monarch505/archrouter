@@ -29,6 +29,8 @@ const { handleMessages } = require("./routes/messages.js");
 const { handleResponses } = require("./routes/responses.js");
 const { handleModels } = require("./routes/models.js");
 const { handleDashboard } = require("./routes/dashboard.js");
+const { handleApiKeys } = require("./routes/apiKeys.js");
+const auth = require("./lib/auth.js");
 
 const BANNER = `
 \x1b[1m\x1b[36m  opencode-router \x1b[0m — standalone 9router-like server (opencode models only)
@@ -56,7 +58,6 @@ async function main() {
 
   if (args.port) cfg.port = parseInt(args.port, 10);
   if (args.host) cfg.host = args.host;
-  if (args["no-auth"]) cfg.auth.requireAuth = false;
   if (args.mode) {
     cfg.proxy.mode = args.mode;
     if (!["none", "upstream", "manual", "embedded", "warp"].includes(args.mode)) {
@@ -69,7 +70,7 @@ async function main() {
 
   process.stdout.write(BANNER);
 
-  const proxyRouter = new ProxyRouter(cfg);
+const proxyRouter = new ProxyRouter(cfg);
   const modelCache = new ModelCache(cfg);
   const router = new Router({ config: cfg, proxyRouter, modelCache });
 
@@ -81,8 +82,26 @@ async function main() {
   proxyRouter.manual.load(store.listProxies());
   if (cfg.combos) {
     const persisted = store.listCombos();
-    cfg.combos = { ...(cfg.combos || {}), ...Object.fromEntries(Object.entries(persisted).map(([k, v]) => [k, v.model])) };
+    cfg.combos = { ...(cfg.combos || {}), ...Object.fromEntries(persisted.map(([k, v]) => [k, v.model])) };
   }
+
+  // Auth is required as soon as any credential exists: a static
+  // ARCHROUTER_KEY, or at least one dashboard-created key. With none, the
+  // router stays open so the first key can be created (see apiKeys.js).
+  const staticKey = (process.env.ARCHROUTER_KEY || "").trim();
+  const requireFlag = process.env.ARCHROUTER_REQUIRE_AUTH;
+  if (requireFlag !== undefined) cfg.auth.requireAuth = requireFlag !== "0";
+  else if (cfg.auth.requireAuth === false) cfg.auth.requireAuth = !!(staticKey || store.countActiveApiKeys() > 0);
+  cfg.auth.apiKey = staticKey || null;
+  if (args["no-auth"]) cfg.auth.requireAuth = false;
+  const authVerify = auth.makeVerifier({
+    staticKey,
+    lookup: (hash) => {
+      const row = store.findApiKeyByHash(hash);
+      return row ? { id: row.id, revoked: row.revoked } : null;
+    },
+  });
+  router.authVerify = authVerify;
 
   await modelCache.refresh(false).catch(() => {});
   proxyRouter.start();
@@ -91,31 +110,59 @@ async function main() {
     const parsed = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     const p = parsed.pathname;
 
-    // CORS preflight
+    // CORS is off unless an origin is configured. A wildcard would let any page in
+// a browser drive the local router; ARCHROUTER_CORS_ORIGIN takes a single
+// origin (comma-separated for several).
+const corsOrigins = (process.env.ARCHROUTER_CORS_ORIGIN || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+function applyCors(req, res) {
+  if (!corsOrigins.length) return false;
+  const origin = req.headers.origin;
+  if (!origin || !corsOrigins.includes(origin)) return false;
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-archrouter-key");
+  return true;
+  }
+
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      });
+      applyCors(req, res);
+      res.writeHead(204);
       res.end();
       return;
     }
+    applyCors(req, res);
+
+    const unauthorized = () => sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
+    const guard = () => {
+      if (!cfg.auth.requireAuth) return false;
+      const v = authVerify(auth.extractKey(req));
+      if (v.ok) {
+        if (v.id) { try { store.touchApiKey(v.id); } catch { /* bookkeeping must not fail a request */ } }
+        return false;
+      }
+      unauthorized();
+      return true;
+    };
 
     try {
+      if (p.startsWith("/api/keys")) return await handleApiKeys(router, req, res, parsed, cfg);
+
       if (p === "/v1/chat/completions" && req.method === "POST") {
-        if (cfg.auth.requireAuth && !isAuthed(req, cfg.auth.apiKey)) return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
+        if (guard()) return;
         return await handleChatCompletions(router, req, res);
       }
       if (p === "/v1/messages" && req.method === "POST") {
-        if (cfg.auth.requireAuth && !isAuthed(req, cfg.auth.apiKey)) return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
+        if (guard()) return;
         return await handleMessages(router, req, res);
       }
       if (p === "/v1/responses" && req.method === "POST") {
-        if (cfg.auth.requireAuth && !isAuthed(req, cfg.auth.apiKey)) return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } });
+        if (guard()) return;
         return await handleResponses(router, req, res);
       }
       if (p === "/v1/messages/count_tokens" && req.method === "POST") {
+        if (guard()) return;
         // Best-effort estimate; forward through opencode for accurate count when possible.
         try {
           const body = await parseBody(req);
@@ -126,12 +173,16 @@ async function main() {
         }
       }
       if ((p === "/v1/models" || p === "/v1beta/models") && req.method === "GET") {
+        if (guard()) return;
         return await handleModels(router, req, res, parsed);
       }
       if (p === "/health" || p === "/api/health") {
         return sendJson(res, 200, { status: "ok", uptimeSeconds: Math.floor(process.uptime()) });
       }
-      // Dashboard + API
+      // Dashboard reads stay open for the monitor UI; anything that changes
+      // state needs a key. GET /api/config exposes the key hash path, so it is
+      // treated as a mutation too.
+      if (req.method !== "GET" && req.method !== "HEAD" && guard()) return;
       return await handleDashboard(router, req, res, parsed);
     } catch (e) {
       logger.error(`route error ${p}: ${e.message}`);
@@ -146,6 +197,7 @@ async function main() {
     logger.info(`  Models             : http://${cfg.host}:${cfg.port}/v1/models`);
     logger.info(`  Dashboard          : http://${cfg.host}:${cfg.port}/`);
     logger.info(`  Proxy mode         : ${cfg.proxy.mode}`);
+    logger.info(`  Auth               : ${cfg.auth.requireAuth ? `required${staticKey ? " (ARCHROUTER_KEY)" : ""} · ${store.countActiveApiKeys()} dashboard key(s)` : "OPEN (no credential configured)"}`);
   });
 
   process.on("SIGINT", () => {
@@ -154,12 +206,6 @@ async function main() {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   });
-}
-
-function isAuthed(req, apiKey) {
-  const h = req.headers["authorization"] || "";
-  if (!apiKey) return true;
-  return h === `Bearer ${apiKey}` || h === apiKey;
 }
 
 function estimateTokens(s) {

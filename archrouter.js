@@ -22,7 +22,7 @@
  * value, contradicting its own comment.
  *
  * Usage: archrouter start|stop|restart|status|logs [name]|update
- *        [--check|--no-restart|--force|--full]|rollback|warp-setup [--force]
+ *        [--check|--no-restart|--force|--full]|rollback|key [name]|warp-setup [--force]
  *        |warp-reset [a|b]|doctor|version
  */
 
@@ -292,11 +292,30 @@ async function cmdDoctor() {
     console.log("  [--] warp trace skipped (no instance running)");
   }
 
-  const models = await curl(["-s", "-o", "NUL", "-m", "8", "https://opencode.ai/zen/v1/models"]);
+  const models = await curl(["-s", "-o", IS_WIN ? "NUL" : "/dev/null", "-m", "8", "https://opencode.ai/zen/v1/models"]);
   say(models !== null, "upstream opencode.ai reachable");
+
+  const authLine = authStatus();
+  if (authLine.requireAuth) {
+    say(authLine.activeKeys > 0, `auth: required, ${authLine.activeKeys} active key(s)${authLine.staticKey ? " + ARCHROUTER_KEY" : ""}`);
+  } else {
+    console.log("  [--] auth: OPEN — no credential exists yet; create one in the dashboard (POST /api/keys)");
+  }
 
   console.log(`== result: ${ok} ok, ${fail} problem(s) ==`);
   process.exit(fail === 0 ? 0 : 1);
+}
+
+// Reads the same store the server uses, so the numbers cannot drift apart.
+function authStatus() {
+  const out = { requireAuth: false, activeKeys: 0, staticKey: !!process.env.ARCHROUTER_KEY };
+  try {
+    const store = require(path.join(REPO, "server", "lib", "store.js"));
+    out.activeKeys = store.countActiveApiKeys();
+  } catch { /* store needs node:sqlite; absent means we cannot tell */ }
+  const flag = process.env.ARCHROUTER_REQUIRE_AUTH;
+  out.requireAuth = flag !== undefined ? flag !== "0" : !!(out.staticKey || out.activeKeys > 0);
+  return out;
 }
 
 async function cmdStart() {
@@ -396,6 +415,24 @@ async function cmdStatus() {
   }
   const health = await httpGet(`http://${API_HOST}:${API_PORT}/health`, 2500);
   console.log(health ? `  api :${API_PORT} → ${health.status} ${health.body.slice(0, 120)}` : `  api :${API_PORT} no response`);
+}
+
+// Creates and prints a key. Existing keys cannot be reprinted (only their
+// SHA-256 is stored), so this always mints a new one.
+function cmdKey(nameArg) {
+  let store, authLib;
+  try {
+    store = require(path.join(REPO, "server", "lib", "store.js"));
+    authLib = require(path.join(REPO, "server", "lib", "auth.js"));
+  } catch (e) {
+    die(`cannot open the key store (${e.message}) — node >= 22 required for node:sqlite`);
+  }
+  const name = (nameArg || "").trim() || `key-${new Date().toISOString().slice(0, 10)}`;
+  const key = authLib.newKey();
+  store.insertApiKey({ id: authLib.keyId(), name, keyHash: authLib.sha256hex(key), prefix: authLib.displayPrefix(key) });
+  log(`created key '${name}' — copy it now, it is not recoverable:`);
+  console.log(`\n  ${key}\n`);
+  log(`${store.countActiveApiKeys()} active key(s). The router requires a key on its next start.`);
 }
 
 function cmdLogs(name) {
@@ -537,7 +574,7 @@ async function cmdWarpReset(idArg) {
 
 /* ---------------- dispatch ---------------- */
 
-const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
+const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|key [name]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -554,6 +591,7 @@ async function main() {
     case "logs": cmdLogs(rest[0]); break;
     case "update": await cmdUpdate(rest); break;
     case "rollback": await cmdRollback(); break;
+    case "key": cmdKey(rest[0]); break;
     case "warp-setup": cmdWarpSetup(rest); break;
     case "warp-reset": await cmdWarpReset(rest[0]); break;
     default: die(`unknown command '${cmd}' (try: ${PROG} help)`);

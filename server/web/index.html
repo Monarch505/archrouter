@@ -290,6 +290,48 @@
   </section>
 </div>
 
+<!-- API keys + opencode wiring -->
+<div class="grid2">
+  <section>
+    <div class="sec-head"><span class="t">API keys</span><span class="meta" id="authInfo">-</span></div>
+    <div class="panel">
+      <div class="row">
+        <input id="keyUnlock" class="grow" placeholder="paste your key to manage (stored in this browser)">
+        <button id="btnUseKey" class="btn-s">Use</button>
+      </div>
+      <div class="row">
+        <input id="keyName" class="grow" placeholder="name for the new key (e.g. opencode)">
+        <button id="btnNewKey" class="btn-p">Create key</button>
+      </div>
+      <pre id="keyNew" style="display:none"></pre>
+      <div id="keyList" style="max-height:220px;overflow:auto">
+        <table>
+          <thead><tr><th>name</th><th>key</th><th>created</th><th>last used</th><th class="num"></th></tr></thead>
+          <tbody id="keyBody"></tbody>
+        </table>
+      </div>
+      <div class="sub" style="margin-top:var(--space-sm)">shown once at creation — archrouter keeps only its SHA-256</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="t">OpenCode</span><span class="meta">/connect</span></div>
+    <div class="panel">
+      <ol class="sub" style="margin:0 0 var(--space-sm)">
+        <li>create a key above and copy it</li>
+        <li>in opencode run <span class="mono">/connect</span> → Other → <span class="mono">archrouter</span> → paste the key</li>
+        <li>then <span class="mono">/models</span> → pick <span class="mono">archrouter/&lt;model&gt;</span> and its effort level</li>
+      </ol>
+      <div class="row">
+        <button id="btnCopyOc" class="btn-s">Copy config</button>
+        <button id="btnWriteOc" class="btn-p">Write opencode.json</button>
+      </div>
+      <div class="sub" style="margin-bottom:var(--space-sm)">target: <span class="mono" id="ocPath">-</span></div>
+      <pre id="ocOut"></pre>
+    </div>
+  </section>
+</div>
+
 <!-- request log -->
 <section>
   <div class="sec-head"><span class="t">Request log</span><span class="meta">live</span></div>
@@ -298,6 +340,27 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Mutating calls carry the key in a header. It is kept in localStorage (per
+// origin) rather than in the URL, so it never lands in history or proxy logs.
+const KEY_STORE = "archrouter.key";
+const apiKey = () => localStorage.getItem(KEY_STORE) || "";
+function apiHeaders(extra) {
+  const h = { ...(extra || {}) };
+  if (apiKey()) h["x-archrouter-key"] = apiKey();
+  return h;
+}
+function setApiKey(v) {
+  if (v) localStorage.setItem(KEY_STORE, v); else localStorage.removeItem(KEY_STORE);
+}
+
+// Key names are user input, so they are escaped before going into innerHTML.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleString() : "-";
+}
 let logs = [];
 
 function fmtUptime(s) {
@@ -399,7 +462,7 @@ async function refreshProxies() {
       : `<tr><td colspan="4" class="sub">no proxies — add or refresh sources</td></tr>`;
     for (const btn of $("proxyBody").querySelectorAll("[data-remove]")) {
       btn.onclick = async () => {
-        await fetch("/api/proxies/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: btn.dataset.remove }) });
+        await fetch("/api/proxies/remove", { method: "POST", headers: apiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ url: btn.dataset.remove }) });
         refreshProxies(); refreshPool();
       };
     }
@@ -413,7 +476,7 @@ async function refreshProxies() {
 $("btnAddProxy").onclick = async () => {
   const url = $("proxyUrl").value.trim();
   if (!url) return;
-  const r = await fetch("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+  const r = await fetch("/api/proxies", { method: "POST", headers: apiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ url }) });
   const d = await r.json();
   if (!d.ok && d.error) alert("failed: " + d.error);
   $("proxyUrl").value = "";
@@ -423,7 +486,7 @@ $("btnRefreshProxies").onclick = async () => {
   const btn = $("btnRefreshProxies");
   btn.textContent = "refreshing..."; btn.disabled = true;
   try {
-    const r = await fetch("/api/proxies/refresh", { method: "POST" });
+    const r = await fetch("/api/proxies/refresh", { method: "POST", headers: apiHeaders() });
     const d = await r.json();
     if (!d.ok && d.error) alert("refresh failed: " + d.error);
   } finally {
@@ -445,7 +508,7 @@ async function refreshCombos() {
     }).join("") || `<tr><td colspan="3" class="sub">no combos</td></tr>`;
     for (const btn of $("comboBody").querySelectorAll("[data-rm]")) {
       btn.onclick = async () => {
-        await fetch("/api/combos/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: btn.dataset.rm }) });
+        await fetch("/api/combos/remove", { method: "POST", headers: apiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: btn.dataset.rm }) });
         refreshCombos(); refreshModels();
       };
     }
@@ -455,7 +518,7 @@ $("btnAddCombo").onclick = async () => {
   const name = $("comboName").value.trim();
   const model = $("comboModel").value.trim();
   if (!name || !model) return;
-  const r = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, model }) });
+  const r = await fetch("/api/combos", { method: "POST", headers: apiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name, model }) });
   const d = await r.json();
   if (!d.ok && d.error) alert("failed: " + d.error);
   $("comboName").value = ""; $("comboModel").value = "";
@@ -481,7 +544,7 @@ function renderLogs() {
 
 /* ---- actions ---- */
 $("btnRotate").onclick = async () => {
-  const r = await fetch("/api/rotate", { method: "POST" });
+  const r = await fetch("/api/rotate", { method: "POST", headers: apiHeaders() });
   const d = await r.json();
   $("session").textContent = d.identity.session;
   $("user").textContent = d.identity.user;
@@ -490,13 +553,13 @@ $("modeSeg").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-mode]");
   if (!btn) return;
   const mode = btn.dataset.mode;
-  const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: { mode } }) });
+  const r = await fetch("/api/config", { method: "POST", headers: apiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ proxy: { mode } }) });
   const d = await r.json();
   if (!d.ok) alert("failed: " + (d.error || "unknown"));
   refreshStatus(); refreshPool();
 });
 $("btnRefreshModels").onclick = async () => {
-  await fetch("/api/models/refresh", { method: "POST" });
+  await fetch("/api/models/refresh", { method: "POST", headers: apiHeaders() });
   refreshModels();
 };
 $("modelFilter").oninput = refreshModels;
@@ -510,7 +573,7 @@ $("btnTest").onclick = async () => {
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ model, messages: [{ role: "user", content: message }], stream }),
     });
     const text = await r.text();
@@ -527,11 +590,86 @@ $("btnTest").onclick = async () => {
   }
 };
 
+async function refreshKeys() {
+  const r = await fetch("/api/keys", { headers: apiHeaders() });
+  if (!r.ok) {
+    $("keyBody").innerHTML = `<tr><td colspan="5" class="sub">HTTP ${r.status} — paste a key above, or create one while none exist</td></tr>`;
+    return;
+  }
+  const d = await r.json();
+  $("keyBody").innerHTML = d.keys.map((k) => `
+    <tr${k.revoked ? ' style="opacity:.45"' : ""}>
+      <td>${esc(k.name)}</td>
+      <td class="mono">${esc(k.prefix)}</td>
+      <td>${fmtTime(k.created_at)}</td>
+      <td>${k.last_used_at ? fmtTime(k.last_used_at) : "-"}</td>
+      <td class="num">${k.revoked ? "revoked" : `<button data-revoke="${k.id}" class="btn-s">Revoke</button>`}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="sub">no keys yet</td></tr>`;
+  for (const b of $("keyBody").querySelectorAll("button[data-revoke]")) {
+    b.onclick = async () => {
+      await fetch("/api/keys/revoke", {
+        method: "POST",
+        headers: apiHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ id: b.dataset.revoke }),
+      });
+      refreshKeys();
+    };
+  }
+}
+
+$("btnUseKey").onclick = () => { setApiKey($("keyUnlock").value.trim()); refreshKeys(); };
+
+$("btnNewKey").onclick = async () => {
+  const r = await fetch("/api/keys", {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name: $("keyName").value.trim() }),
+  });
+  const d = await r.json();
+  if (!r.ok) { $("keyNew").style.display = "block"; $("keyNew").textContent = `HTTP ${r.status} ${JSON.stringify(d)}`; return; }
+  setApiKey(d.key);
+  $("keyUnlock").value = d.key;
+  $("keyNew").style.display = "block";
+  $("keyNew").textContent = `${d.key}\n\ncopy it now — it is not recoverable`;
+  $("keyName").value = "";
+  refreshKeys();
+};
+
+$("btnCopyOc").onclick = async () => {
+  const r = await fetch("/api/opencode/snippet", { headers: apiHeaders() });
+  const d = await r.json();
+  const text = JSON.stringify(d.fragment, null, 2);
+  $("ocOut").textContent = text;
+  try { await navigator.clipboard.writeText(text); $("ocOut").textContent = text + "\n\n[copied]"; } catch { $("ocOut").textContent = text + "\n\n[select and copy manually]"; }
+};
+
+$("btnWriteOc").onclick = async () => {
+  const r = await fetch("/api/opencode/write", { method: "POST", headers: apiHeaders() });
+  const d = await r.json();
+  $("ocOut").textContent = r.ok
+    ? `written: ${d.file}\n${d.models} models\nbackup: ${d.backup || "none"}`
+    : `HTTP ${r.status} ${d.error || JSON.stringify(d)}`;
+};
+
+async function refreshAuthInfo() {
+  try {
+    const r = await fetch("/api/status");
+    const s = await r.json();
+    const a = s.auth || {};
+    $("authInfo").textContent = a.requireAuth
+      ? `required · ${a.activeKeys} active`
+      : "open (no key yet)";
+    $("ocPath").textContent = s.opencode?.configPath || "-";
+  } catch {}
+}
+
 setInterval(refreshStatus, 3000);
 setInterval(refreshPool, 5000);
 setInterval(refreshLogs, 3000);
 refreshStatus(); refreshModels(); refreshPool(); refreshLogs();
 refreshProxies(); refreshCombos();
+refreshKeys(); refreshAuthInfo();
+$("keyUnlock").value = apiKey();
 </script>
 </body>
 </html>

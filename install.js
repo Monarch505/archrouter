@@ -286,8 +286,40 @@ function writeEnv() {
     if (!/^ARCHROUTER_STAGGER_MS=/m.test(text)) {
       text += "# ms between starting warp-a and warp-b (fewer same-IP collisions)\nARCHROUTER_STAGGER_MS=8000\n";
     }
+    if (!/^ARCHROUTER_CORS_ORIGIN=/m.test(text)) {
+      text += "# comma-separated origins allowed to call the API from a browser; empty = no CORS at all\nARCHROUTER_CORS_ORIGIN=\n";
+    }
     fs.writeFileSync(envFile, text);
     ok(`.env written → ${envFile}`);
+  }
+}
+
+/* ---------------- first API key ----------------
+ * Created automatically on a fresh install so `/connect` in opencode has
+ * something to use. Plaintext is shown here once and never again — only its
+ * SHA-256 is stored. Existing installs are left alone so upgrading never locks
+ * out a client that has no key yet; such an install can create one from the
+ * dashboard. */
+
+function ensureFirstKey() {
+  step("API key");
+  if (nodeMajor() < 22) { info("node < 22, skipping (server needs it anyway)"); return null; }
+  try {
+    const store = require(path.join(REPO, "server", "lib", "store.js"));
+    const auth = require(path.join(REPO, "server", "lib", "auth.js"));
+    if (store.countActiveApiKeys() > 0) {
+      ok(`${store.countActiveApiKeys()} key(s) already exist — kept (manage them in the dashboard)`);
+      return null;
+    }
+    const key = auth.newKey();
+    store.insertApiKey({ id: auth.keyId(), name: "default", keyHash: auth.sha256hex(key), prefix: auth.displayPrefix(key) });
+    if (!IS_WIN) { try { fs.chmodSync(DB_PATH, 0o600); } catch { /* best effort */ } }
+    ok("created key 'default' — copy it now, it cannot be shown again:");
+    console.log(`\n    ${key}\n`);
+    return key;
+  } catch (e) {
+    bad(`could not create the first key: ${e.message}`);
+    return null;
   }
 }
 
@@ -404,6 +436,7 @@ async function unattended() {
   if (OFFLINE) info("--offline: skipped binary download");
   else await installBins();
   installShims();
+  const firstKey = ensureFirstKey();
 
   if (UNATTENDED) {
     if (nodeMajor() < 22) die("node >= 22 required for unattended deploy");
@@ -411,6 +444,16 @@ async function unattended() {
   }
 
   console.log(`\n== summary: ${failures ? `${failures} problem(s)` : "all good"} ==`);
+  if (firstKey) {
+    console.log(`
+the key above is the only credential the router needs. Put it into opencode with
+  /connect  ->  Other  ->  archrouter  ->  paste the key
+then /models lists every model with its effort levels.
+
+Archrouter also exposes a dashboard at http://127.0.0.1:${process.env.ARCHROUTER_PORT || 20399}/
+where keys are created, revoked and the opencode.json fragment is written for you.
+`);
+  }
   if (!UNATTENDED) {
     console.log(`
 next:

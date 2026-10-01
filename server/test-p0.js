@@ -250,4 +250,103 @@ ok("collapseResponsesSSE: stream kosong → reject", async () => {
   await assert.rejects(Router.collapseResponsesSSE(Readable.from(["data: [DONE]\n\n"])), /empty|without completion/);
 });
 
+// Auth: key extraction and verification. The DB lookup is injected, so these
+// stay offline and never touch ~/.archrouter.
+const auth = require("./lib/auth.js");
+ok("auth: key format + prefix", () => {
+  const k = auth.newKey();
+  assert.match(k, /^sk-arch-[A-Za-z0-9_-]{32}$/);
+  assert.ok(auth.displayPrefix(k).startsWith("sk-arch-"));
+  assert.ok(!auth.displayPrefix(k).includes(k.slice(10, 20)), "display prefix must not leak the secret");
+});
+ok("auth: extractKey from Bearer / raw / x-archrouter-key, ignores ?key=", () => {
+  assert.strictEqual(auth.extractKey({ headers: { authorization: "Bearer abc123" } }), "abc123");
+  assert.strictEqual(auth.extractKey({ headers: { authorization: "bearer  abc123 " } }), "abc123");
+  assert.strictEqual(auth.extractKey({ headers: { authorization: "abc123" } }), "abc123");
+  assert.strictEqual(auth.extractKey({ headers: { "x-archrouter-key": "abc123" } }), "abc123");
+  assert.strictEqual(auth.extractKey({ headers: {} }), "");
+  assert.strictEqual(auth.extractKey({ headers: {}, url: "/v1/models?key=abc123" }), "");
+});
+ok("auth: no credential configured = everything open", () => {
+  const v = auth.makeVerifier({});
+  assert.strictEqual(v("").ok, true);
+  assert.strictEqual(v("anything").ok, true);
+});
+ok("auth: static ARCHROUTER_KEY only", () => {
+  const v = auth.makeVerifier({ staticKey: "sk-arch-static" });
+  assert.strictEqual(v("sk-arch-static").ok, true);
+  assert.strictEqual(v("sk-arch-wrong").ok, false);
+  assert.strictEqual(v("").ok, false);
+  assert.strictEqual(v("").reason, "missing-key");
+});
+ok("auth: dashboard keys — hash lookup, revoked rejected, unknown rejected", () => {
+  const good = auth.newKey();
+  const revoked = auth.newKey();
+  const db = new Map([
+    [auth.sha256hex(good), { id: "k1", revoked: false }],
+    [auth.sha256hex(revoked), { id: "k2", revoked: true }],
+  ]);
+  const v = auth.makeVerifier({ lookup: (hash) => db.get(hash) || null });
+  assert.strictEqual(v(good).ok, true);
+  assert.strictEqual(v(good).id, "k1");
+  assert.strictEqual(v(revoked).ok, false);
+  assert.strictEqual(v(revoked).reason, "revoked");
+  assert.strictEqual(v(auth.newKey()).reason, "unknown-key");
+  assert.strictEqual(v("").reason, "missing-key");
+});
+ok("auth: static key wins over db, db still usable", () => {
+  const dbKey = auth.newKey();
+  const db = new Map([[auth.sha256hex(dbKey), { id: "k1", revoked: false }]]);
+  const v = auth.makeVerifier({ staticKey: "sk-arch-env", lookup: (h) => db.get(h) || null });
+  assert.strictEqual(v("sk-arch-env").reason, "static");
+  assert.strictEqual(v(dbKey).reason, "db");
+});
+ok("auth: constant-time compare rejects prefix truncation", () => {
+  assert.strictEqual(auth.equalConstantTime("sk-arch-abcdef", "sk-arch-abcdef"), true);
+  assert.strictEqual(auth.equalConstantTime("sk-arch-abcdef", "sk-arch-abcdeg"), false);
+  assert.strictEqual(auth.equalConstantTime("sk-arch-abc", "sk-arch-abcdef"), false);
+});
+
+// opencode.json fragment: models come from the live list, variants from
+// modelCaps, and a merge must not disturb other providers.
+const opencodeConfig = require("./lib/opencodeConfig.js");
+const { capsFor, variantsFor } = require("./lib/modelCaps.js");
+ok("caps: curated table + free/paid alias", () => {
+  assert.deepStrictEqual(capsFor("oc/mimo-v2.5-free").efforts, ["low", "medium", "high"]);
+  assert.strictEqual(capsFor("oc/mimo-v2.5-free").kind, "chat");
+  assert.strictEqual(capsFor("mimo-v2.5").kind, "chat", "paid id must resolve from the -free entry");
+  assert.strictEqual(capsFor("oc/muse-spark-1.3-contributor-free").kind, "responses");
+  assert.deepStrictEqual(capsFor("oc/jev-1.13-free").efforts, []);
+  assert.strictEqual(capsFor("oc/deepseek-v4-flash-free").kind, "unavailable");
+  assert.strictEqual(capsFor("oc/some-new-upstream-model").kind, "chat", "unknown model stays usable");
+  assert.strictEqual(variantsFor("oc/jev-1.13-free"), null, "no reasoning → no variants");
+  assert.strictEqual(variantsFor("oc/muse-spark-1.3-contributor-free").high.reasoningEffort, "high");
+});
+ok("opencode fragment: skips unavailable, variants per model, openai-compatible npm", () => {
+  const frag = opencodeConfig.buildFragment({
+    host: "127.0.0.1", port: 20399,
+    modelIds: ["oc/mimo-v2.5-free", "oc/jev-1.13-free", "oc/deepseek-v4-flash-free"],
+  });
+  const p = frag.provider.archrouter;
+  assert.strictEqual(p.npm, "@ai-sdk/openai-compatible");
+  assert.strictEqual(p.options.baseURL, "http://127.0.0.1:20399/v1");
+  assert.deepStrictEqual(Object.keys(p.models), ["mimo-v2.5-free", "jev-1.13-free"]);
+  assert.deepStrictEqual(Object.keys(p.models["mimo-v2.5-free"].variants), ["low", "medium", "high"]);
+  assert.strictEqual(p.models["jev-1.13-free"].variants, undefined);
+});
+ok("opencode merge: keeps other providers, agents and the top-level model", () => {
+  const frag = opencodeConfig.buildFragment({ modelIds: ["oc/mimo-v2.5-free"] });
+  const existing = {
+    $schema: "https://opencode.ai/config.json",
+    model: "9router/Big-P",
+    provider: { "9router": { npm: "@ai-sdk/openai-compatible", options: { baseURL: "http://127.0.0.1:20128/v1" } } },
+    agent: { explorer: { model: "OcRouter/Big-P" } },
+  };
+  const merged = opencodeConfig.mergeFragment(existing, frag);
+  assert.strictEqual(merged.model, "9router/Big-P");
+  assert.strictEqual(merged.provider["9router"].options.baseURL, "http://127.0.0.1:20128/v1");
+  assert.strictEqual(merged.agent.explorer.model, "OcRouter/Big-P");
+  assert.ok(merged.provider.archrouter.models["mimo-v2.5-free"]);
+});
+
 console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);

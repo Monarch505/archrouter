@@ -19,6 +19,7 @@ const logger = require("../lib/logger.js");
 const configStore = require("../lib/configStore.js");
 const store = require("../lib/store.js");
 const { parseBody, sendJson } = require("./chatCompletions.js");
+const opencodeConfig = require("../lib/opencodeConfig.js");
 
 const INDEX_HTML = path.join(__dirname, "..", "web", "index.html");
 
@@ -54,7 +55,38 @@ async function handleDashboard(router, req, res, url) {
       usageTotal: router.logs.usageTotal,
       modelCount: router.modelCache.data?.count ?? null,
       modelsFetchedAt: router.modelCache.data?.fetchedAt ?? null,
+      auth: {
+        requireAuth: !!cfg.auth.requireAuth,
+        activeKeys: store.countActiveApiKeys(),
+        bootstrapOpen: store.countActiveApiKeys() === 0,
+      },
+      opencode: { configPath: opencodeConfig.configPath() },
     });
+  }
+
+  if (p === "/api/opencode/snippet" && req.method === "GET") {
+    const cfg = configStore.get();
+    const list = await router.modelCache.listOpenAI();
+    const fragment = opencodeConfig.buildFragment({
+      host: cfg.host,
+      port: cfg.port,
+      modelIds: (list.data || []).map((m) => m.id),
+    });
+    return sendJson(res, 200, { fragment, configPath: opencodeConfig.configPath() });
+  }
+
+  if (p === "/api/opencode/write" && req.method === "POST") {
+    const cfg = configStore.get();
+    const list = await router.modelCache.listOpenAI();
+    const fragment = opencodeConfig.buildFragment({
+      host: cfg.host,
+      port: cfg.port,
+      modelIds: (list.data || []).map((m) => m.id),
+    });
+    const result = opencodeConfig.writeConfig(fragment);
+    if (!result.ok) return sendJson(res, 400, { error: { message: result.error } });
+    logger.info(`[opencode] provider written to ${result.file} (${result.models} models, backup: ${result.backup || "none"})`);
+    return sendJson(res, 200, result);
   }
 
   if (p === "/api/identity") {

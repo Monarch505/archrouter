@@ -47,6 +47,15 @@ function getDb() {
       key      TEXT PRIMARY KEY,
       value    TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      key_hash     TEXT NOT NULL UNIQUE,
+      prefix       TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      last_used_at TEXT,
+      revoked_at   TEXT
+    );
     DROP TABLE IF EXISTS aliases;
   `);
   return db;
@@ -133,6 +142,50 @@ function seedCombos(combos) {
   return listCombos();
 }
 
+/* ---------------- api keys ----------------
+ * Only the SHA-256 of a key is persisted. The plaintext is returned once at
+ * creation and cannot be recovered afterwards, so a leaked database does not
+ * hand out working credentials. */
+
+function listApiKeys() {
+  const rows = getDb()
+    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at FROM api_keys ORDER BY created_at")
+    .all();
+  return rows.map((r) => ({ ...r, revoked: !!r.revoked_at }));
+}
+
+function insertApiKey({ id, name, keyHash, prefix }) {
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("INSERT INTO api_keys (id, name, key_hash, prefix, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(id, name, keyHash, prefix || "", now);
+  return { id, name, prefix: prefix || "", created_at: now, last_used_at: null, revoked_at: null, revoked: false };
+}
+
+function findApiKeyByHash(keyHash) {
+  const row = getDb()
+    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE key_hash = ?")
+    .get(keyHash);
+  if (!row) return null;
+  return { ...row, revoked: !!row.revoked_at };
+}
+
+function touchApiKey(id) {
+  getDb().prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+}
+
+function revokeApiKey(id) {
+  getDb()
+    .prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+    .run(new Date().toISOString(), id);
+  return listApiKeys();
+}
+
+function countActiveApiKeys() {
+  const row = getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL").get();
+  return row ? Number(row.n) : 0;
+}
+
 function close() {
   if (db) { try { db.close(); } catch {} db = null; }
 }
@@ -150,5 +203,11 @@ module.exports = {
   getSetting,
   setSetting,
   getAllSettings,
+  listApiKeys,
+  insertApiKey,
+  findApiKeyByHash,
+  touchApiKey,
+  revokeApiKey,
+  countActiveApiKeys,
   close,
 };
