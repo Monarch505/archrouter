@@ -82,7 +82,7 @@ const proxyRouter = new ProxyRouter(cfg);
   proxyRouter.manual.load(store.listProxies());
   if (cfg.combos) {
     const persisted = store.listCombos();
-    cfg.combos = { ...(cfg.combos || {}), ...Object.fromEntries(persisted.map(([k, v]) => [k, v.model])) };
+    cfg.combos = { ...(cfg.combos || {}), ...Object.fromEntries(Object.entries(persisted).map(([k, v]) => [k, v.model])) };
   }
 
   // Auth is required as soon as any credential exists: a static
