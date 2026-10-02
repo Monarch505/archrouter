@@ -26,7 +26,8 @@ const DEFAULTS = {
   retries: 3,
   requestTimeoutMs: 120000,
   cooldown: { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 },
-  models: { cacheSeconds: 300, prefix: "oc/" },
+  // freeOnly: serve nothing but the -free tier. ARCHROUTER_FREE_ONLY=0 lifts it.
+  models: { cacheSeconds: 300, prefix: "oc/", freeOnly: true },
   combos: {},
   proxy: {
     mode: "none", // none | upstream | manual | embedded | warp (warp = Fase 3 pool :11801)

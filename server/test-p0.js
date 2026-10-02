@@ -332,6 +332,32 @@ ok("auth mode: auto stays open until a usable key exists", () => {
   assert.strictEqual(auth.normalizeMode("on"), "on");
 });
 
+// Free-only: paid ids must not be catalogued and must not run.
+const { isFreeModel, freeOnlyEnabled } = require("./lib/modelCaps.js");
+ok("free-only: -free suffix decides, prefix is irrelevant", () => {
+  assert.strictEqual(isFreeModel("space-bunny-free"), true);
+  assert.strictEqual(isFreeModel("oc/space-bunny-free"), true);
+  assert.strictEqual(isFreeModel("combo/Jev"), false);
+  assert.strictEqual(isFreeModel("claude-opus-5-5"), false);
+  assert.strictEqual(isFreeModel("muse-spark-1.3"), false, "the paid sibling of a -free model");
+  assert.strictEqual(isFreeModel("muse-spark-1.3-contributor-free"), true);
+  assert.strictEqual(isFreeModel(""), false);
+  assert.strictEqual(freeOnlyEnabled({}), true, "on unless told otherwise");
+  assert.strictEqual(freeOnlyEnabled({ models: { freeOnly: false } }), false);
+});
+ok("free-only: resolveModel rejects a paid id, accepts a free one", () => {
+  const cfg = { models: { freeOnly: true } };
+  const r = Object.create(Router.prototype);
+  r.config = cfg;
+  assert.strictEqual(r.resolveModel("oc/space-bunny-free").bare, "space-bunny-free");
+  assert.throws(() => r.resolveModel("oc/claude-opus-5-5"), (e) => e.status === 400 && e.code === "model_not_free");
+  assert.throws(() => r.resolveModel("claude-sonnet-5"), /only free models/);
+  // a combo is resolved first, so its target is what gets judged
+  r.config = { ...cfg, combos: { Paid: "claude-opus-5-5", Free: "space-bunny-free" } };
+  assert.throws(() => r.resolveModel("Paid"), (e) => e.code === "model_not_free");
+  assert.strictEqual(r.resolveModel("combo/Free").bare, "space-bunny-free");
+});
+
 // opencode.json fragment: models come from the live list, variants from
 // modelCaps, and a merge must not disturb other providers.
 const opencodeConfig = require("./lib/opencodeConfig.js");

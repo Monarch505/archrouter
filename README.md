@@ -93,6 +93,20 @@ Chroot/Android note: if sing-box logs `missing default interface` /
 `archrouter warp-setup` (regenerates configs, keeps accounts) +
 `archrouter restart`. If the ISP filters UDP 2408, try `ARCHROUTER_WG_PORT=500`.
 
+### Free models only
+
+archrouter serves **only the free tier**. A model must end in `-free` to be
+served at all: paid ids (`claude-*`, `gemini-*`, `big-p`, `muse-spark-1.3`
+without the suffix, …) never appear in `GET /v1/models` and are refused with
+`400 model_not_free` if a client asks for one by hand, so a typo cannot burn
+quota. Combos must point at a `-free` model too. `ARCHROUTER_FREE_ONLY=0`
+lifts the rule if you ever need it.
+
+Free models are not all on the same path: `muse-spark-*-contributor-free`
+answers only on `/v1/responses`, `jev-1.13-free` only on `/v1/messages`, the
+rest on `/v1/chat/completions`. `GET /v1/models` reports the correct one per
+model in `capabilities.kind`.
+
 ### API keys
 
 Keys live in the dashboard (`http://127.0.0.1:20399/` → **API keys**), not in

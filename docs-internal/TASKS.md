@@ -146,9 +146,20 @@
       - **anti-lockout**: `POST /api/auth/mode` tetap terbuka saat tidak ada key
         aktif (mode `on` + semua key di-revoke tidak=dead end)
       - migrasi DB lama: `ensureColumn()` menambah `is_active` retroactive
-      - test: `server/test-auth-store.js` **5/5**, `test-p0.js` **45/45**,
+      - test: `server/test-auth-store.js` **5/5**, `test-p0.js` **47/47**,
         `scripts/verify-auth-toggle.ps1` **19/19** (instance sekali pakai,
         port + DB sendiri)
+- [x] **Free-only (2026-10-02)** — hanya tier `-free` yang dilayani; user emphatik
+      bahwa model bayar / ber-API-key tidak boleh masuk archrouter
+      - `isFreeModel()`: id harus berakhir `-free` (prefix `oc/`, `combo/` diabaikan)
+      - katalog: `models.js` buang non-free + combo yang menunjuk model non-free
+      - request: `resolveModel()` lempar `400 model_not_free` **sebelum** sampai
+        upstream, jadi ketik manual tidak bisa membakar kuota
+      - route chat/responses/messages teruskan `code` ke body error
+      - dashboard: combo ke model non-free ditolak 400
+      - escape hatch `ARCHROUTER_FREE_ONLY=0` (default: aktif)
+      - 11 model free live; `test-p0.js` **47/47**,
+        `scripts/verify-free-only.ps1` **12/12** (katalog + 400 + 200 nyata)
 - [ ] Dashboard pangkas: status, pool, log (SSE), config, test box
 - [ ] Uji: muse-spark via `/v1/responses` 200; thinking-block muncul di log
 - [x] Probe: `reasoning_tokens` chat — primer high → **88** vs eksplisit low →

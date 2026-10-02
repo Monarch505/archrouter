@@ -26,7 +26,7 @@ async function handleMessages(router, req, res) {
   try {
     resolved = router.resolveModel(body.model);
   } catch (e) {
-    return sendJsonAnthropic(res, 400, { type: "error", error: { type: "invalid_request_error", message: e.message } });
+    return sendJsonAnthropic(res, 400, { type: "error", error: { type: "invalid_request_error", message: e.message, code: e.code } });
   }
 
   const oai = anthropic.toOpenAI({ ...body, model: resolved.bare });

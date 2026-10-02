@@ -6,7 +6,7 @@
 
 const transport = require("./transport.js");
 const logger = require("./logger.js");
-const { capsFor } = require("./modelCaps.js");
+const { capsFor, isFreeModel, freeOnlyEnabled } = require("./modelCaps.js");
 
 class ModelCache {
   constructor(config) {
@@ -33,15 +33,21 @@ class ModelCache {
         const resp = await transport.request({ url, headers, timeoutMs: 20000, json: true });
         if (resp.status === 200 && Array.isArray(resp.json?.data)) {
           const prefix = this.config.models?.prefix || "oc/";
+          const freeOnly = freeOnlyEnabled(this.config);
           const comboMap = this.config.combos || {};
-          const comboData = Object.keys(comboMap).map((name) => ({
+          // Models upstream marks unavailable are dropped from the catalog so
+          // clients stop offering them; in free-only mode everything without a
+          // -free suffix goes too, and combos pointing at those models with them.
+          const usable = resp.json.data.filter((m) => capsFor(m.id).kind !== "unavailable");
+          const upstream = freeOnly ? usable.filter((m) => isFreeModel(m.id)) : usable;
+          const comboNames = Object.entries(comboMap)
+            .filter(([, target]) => !freeOnly || isFreeModel(target))
+            .map(([name]) => name);
+          const comboData = comboNames.map((name) => ({
             id: `combo/${name}`,
             object: "model",
             owned_by: "combo",
           }));
-          // Models upstream marks unavailable are dropped from the catalog so
-          // clients stop offering them.
-          const upstream = resp.json.data.filter((m) => capsFor(m.id).kind !== "unavailable");
           this.data = {
             fetchedAt: new Date().toISOString(),
             count: upstream.length + comboData.length,
@@ -61,7 +67,8 @@ class ModelCache {
             },
           };
           this.fetchedAt = now;
-          logger.info(`[models] refreshed: ${this.data.count} models (incl. ${comboData.length} combo)`);
+          const dropped = resp.json.data.length - upstream.length;
+          logger.info(`[models] refreshed: ${this.data.count} models (incl. ${comboData.length} combo)${dropped > 0 ? `, ${dropped} non-free hidden` : ""}`);
         } else {
           logger.warn(`[models] fetch returned ${resp.status}`);
         }

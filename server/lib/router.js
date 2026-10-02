@@ -16,6 +16,7 @@ const sse = require("./sse.js");
 const logger = require("./logger.js");
 const { RequestLog } = require("./requestLog.js");
 const { unionWith, enrich, primer, normalizeResponses } = require("./ocEmbed.js");
+const { isFreeModel, freeOnlyEnabled } = require("./modelCaps.js");
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -170,6 +171,14 @@ class Router {
     }
     const bare = model.startsWith("oc/") ? model.slice(3) : model;
     if (!bare) throw Object.assign(new Error("model is required"), { status: 400, code: "invalid_request_error" });
+    // Free-only policy: a paid id must not reach upstream even if a client
+    // asks for it by hand, otherwise one typo burns quota we do not have.
+    if (freeOnlyEnabled(this.config) && !isFreeModel(bare)) {
+      throw Object.assign(
+        new Error(`only free models are served here — "${bare}" is not a -free model. see GET /v1/models for the list.`),
+        { status: 400, code: "model_not_free" },
+      );
+    }
     return { original: incoming, model, bare };
   }
 

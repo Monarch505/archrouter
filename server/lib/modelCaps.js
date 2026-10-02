@@ -52,8 +52,22 @@ function overrides() {
 }
 
 function bare(modelId) {
-  return String(modelId || "").replace(/^(oc|combo)\//, "");
+  return String(modelId || "").replace(/^(combo\/|oc\/)/, "");
 }
+
+// Only the free tier is served. Upstream marks it with a -free suffix on the
+// model id; everything else (claude, gemini, big-p, muse-spark without the
+// suffix) costs quota we do not have, so it never appears and never runs.
+function isFreeModel(modelId) {
+  return bare(modelId).endsWith("-free");
+}
+
+function freeOnlyEnabled(config) {
+  if (process.env.ARCHROUTER_FREE_ONLY === "0") return false;
+  if (process.env.ARCHROUTER_FREE_ONLY === "1") return true;
+  return config?.models?.freeOnly !== false;
+}
+
 
 function capsFor(modelId) {
   const id = bare(modelId);
@@ -81,4 +95,4 @@ function variantsFor(modelId) {
   return out;
 }
 
-module.exports = { CAPS, DEFAULT_CAPS, capsFor, variantsFor, bare };
+module.exports = { CAPS, DEFAULT_CAPS, capsFor, variantsFor, bare, isFreeModel, freeOnlyEnabled };

@@ -28,7 +28,7 @@ async function handleResponses(router, req, res) {
   try {
     resolved = router.resolveModel(body.model);
   } catch (e) {
-    return sendJson(res, 400, { error: { message: e.message, type: "invalid_request_error" } });
+    return sendJson(res, 400, { error: { message: e.message, type: "invalid_request_error", code: e.code } });
   }
   body.model = resolved.bare;
 

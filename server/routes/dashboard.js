@@ -20,6 +20,7 @@ const configStore = require("../lib/configStore.js");
 const store = require("../lib/store.js");
 const { parseBody, sendJson } = require("./chatCompletions.js");
 const opencodeConfig = require("../lib/opencodeConfig.js");
+const { isFreeModel, freeOnlyEnabled } = require("../lib/modelCaps.js");
 
 const INDEX_HTML = path.join(__dirname, "..", "web", "index.html");
 
@@ -180,6 +181,9 @@ async function handleDashboard(router, req, res, url) {
       const name = String(b.name || "").trim();
       const model = String(b.model || "").trim();
       if (!name || !model) return sendJson(res, 400, { error: "combo name and target model required" });
+      if (freeOnlyEnabled(configStore.get()) && !isFreeModel(model)) {
+        return sendJson(res, 400, { error: `combo target must be a -free model, got "${model}"` });
+      }
       store.addCombo(name, model);
       // Persist into config.combos as well so resolveModel() sees it live.
       const cfg = configStore.get();
