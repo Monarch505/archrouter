@@ -296,10 +296,14 @@ async function cmdDoctor() {
   say(models !== null, "upstream opencode.ai reachable");
 
   const authLine = authStatus();
+  const modeTxt = authLine.mode && authLine.mode !== "auto" ? ` [mode=${authLine.mode}]` : "";
+  if (authLine.source && !["auto", "config"].includes(authLine.source)) modeTxt += ` [forced by ${authLine.source}]`;
   if (authLine.requireAuth) {
-    say(authLine.activeKeys > 0, `auth: required, ${authLine.activeKeys} active key(s)${authLine.staticKey ? " + ARCHROUTER_KEY" : ""}`);
+    say(authLine.enabledKeys > 0, `auth: required${modeTxt}, ${authLine.enabledKeys}/${authLine.activeKeys} key(s) enabled${authLine.staticKey ? " + ARCHROUTER_KEY" : ""}`);
+  } else if (authLine.activeKeys > 0) {
+    say(true, `auth: open by choice${modeTxt} — ${authLine.activeKeys} key(s) exist but none are enabled`);
   } else {
-    console.log("  [--] auth: OPEN — no credential exists yet; create one in the dashboard (POST /api/keys)");
+    console.log(`  [--] auth: OPEN${modeTxt} — no credential exists yet; create one in the dashboard (POST /api/keys)`);
   }
 
   console.log(`== result: ${ok} ok, ${fail} problem(s) ==`);
@@ -308,13 +312,25 @@ async function cmdDoctor() {
 
 // Reads the same store the server uses, so the numbers cannot drift apart.
 function authStatus() {
-  const out = { requireAuth: false, activeKeys: 0, staticKey: !!process.env.ARCHROUTER_KEY };
+  const out = { requireAuth: false, mode: "auto", source: "", activeKeys: 0, enabledKeys: 0, staticKey: !!process.env.ARCHROUTER_KEY };
   try {
     const store = require(path.join(REPO, "server", "lib", "store.js"));
+    const configStore = require(path.join(REPO, "server", "lib", "configStore.js"));
+    const auth = require(path.join(REPO, "server", "lib", "auth.js"));
     out.activeKeys = store.countActiveApiKeys();
-  } catch { /* store needs node:sqlite; absent means we cannot tell */ }
-  const flag = process.env.ARCHROUTER_REQUIRE_AUTH;
-  out.requireAuth = flag !== undefined ? flag !== "0" : !!(out.staticKey || out.activeKeys > 0);
+    out.enabledKeys = store.countEnabledApiKeys();
+    out.mode = auth.normalizeMode(configStore.get().auth?.requireAuthMode);
+    const state = auth.resolveAuthRequired({
+      mode: out.mode,
+      envFlag: process.env.ARCHROUTER_REQUIRE_AUTH,
+      staticKey: process.env.ARCHROUTER_KEY || "",
+      activeKeys: out.enabledKeys,
+    });
+    out.requireAuth = state.required;
+    out.source = state.source;
+  } catch (e) {
+    out.source = "unknown";
+  }
   return out;
 }
 

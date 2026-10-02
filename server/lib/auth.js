@@ -50,7 +50,7 @@ function extractKey(req) {
   return (bearer ? bearer[1] : value).trim();
 }
 
-// lookup(keyHash) -> { id, revoked } | null   (injected so tests need no DB)
+// lookup(keyHash) -> { id, active, revoked } | null   (injected so tests need no DB)
 function makeVerifier({ staticKey = "", lookup = null } = {}) {
   return function verify(key) {
     if (!staticKey && !lookup) return { ok: true, reason: "no-auth-configured" };
@@ -59,9 +59,35 @@ function makeVerifier({ staticKey = "", lookup = null } = {}) {
     if (!lookup) return { ok: false, reason: "unknown-key" };
     const row = lookup(sha256hex(key));
     if (!row) return { ok: false, reason: "unknown-key" };
-    if (row.revoked) return { ok: false, reason: "revoked" };
+    if (row.revoked) return { ok: false, reason: "revoked", id: row.id };
+    if (row.active === false) return { ok: false, reason: "inactive", id: row.id };
     return { ok: true, reason: "db", id: row.id, name: row.name };
   };
+}
+
+// Three-way switch, mirroring the vansrouter/9router setting:
+//   off   — the router answers without a credential
+//   on    — a key is always required
+//   auto  — required as soon as a credential exists, open before that so the
+//           first key can be created
+// ARCHROUTER_REQUIRE_AUTH and --no-auth win over the stored mode, so a
+// deployment can be forced open or closed without touching the database.
+function resolveAuthRequired({ mode = "auto", envFlag, noAuthFlag = false, staticKey = "", activeKeys = 0 } = {}) {
+  if (noAuthFlag) return { required: false, source: "--no-auth" };
+  if (envFlag !== undefined && envFlag !== "") {
+    const on = String(envFlag) !== "0" && String(envFlag) !== "false";
+    return { required: on, source: "ARCHROUTER_REQUIRE_AUTH" };
+  }
+  if (mode === "on") return { required: true, source: "config" };
+  if (mode === "off") return { required: false, source: "config" };
+  return {
+    required: !!(staticKey || activeKeys > 0),
+    source: "auto",
+  };
+}
+
+function normalizeMode(v) {
+  return v === "on" || v === "off" ? v : "auto";
 }
 
 module.exports = {
@@ -73,4 +99,6 @@ module.exports = {
   displayPrefix,
   extractKey,
   makeVerifier,
+  resolveAuthRequired,
+  normalizeMode,
 };

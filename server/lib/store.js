@@ -54,11 +54,26 @@ function getDb() {
       prefix       TEXT NOT NULL,
       created_at   TEXT NOT NULL,
       last_used_at TEXT,
-      revoked_at   TEXT
+      revoked_at   TEXT,
+      is_active    INTEGER NOT NULL DEFAULT 1
     );
     DROP TABLE IF EXISTS aliases;
   `);
+  ensureColumn(db, "api_keys", "is_active", "INTEGER NOT NULL DEFAULT 1");
   return db;
+}
+
+// Older installs already have api_keys without later columns; CREATE TABLE
+// IF NOT EXISTS leaves them untouched, so add what is missing.
+function ensureColumn(database, table, column, decl) {
+  try {
+    const cols = database.prepare(`PRAGMA table_info(${table})`).all();
+    if (cols.some((c) => c.name === column)) return false;
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /* ---------------- settings ---------------- */
@@ -149,25 +164,34 @@ function seedCombos(combos) {
 
 function listApiKeys() {
   const rows = getDb()
-    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at FROM api_keys ORDER BY created_at")
+    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at, is_active FROM api_keys ORDER BY created_at")
     .all();
-  return rows.map((r) => ({ ...r, revoked: !!r.revoked_at }));
+  return rows.map((r) => ({ ...r, active: !!r.is_active, revoked: !!r.revoked_at }));
 }
 
 function insertApiKey({ id, name, keyHash, prefix }) {
   const now = new Date().toISOString();
   getDb()
-    .prepare("INSERT INTO api_keys (id, name, key_hash, prefix, created_at) VALUES (?, ?, ?, ?, ?)")
+    .prepare("INSERT INTO api_keys (id, name, key_hash, prefix, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)")
     .run(id, name, keyHash, prefix || "", now);
-  return { id, name, prefix: prefix || "", created_at: now, last_used_at: null, revoked_at: null, revoked: false };
+  return { id, name, prefix: prefix || "", created_at: now, last_used_at: null, revoked_at: null, active: true, revoked: false };
 }
 
 function findApiKeyByHash(keyHash) {
   const row = getDb()
-    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE key_hash = ?")
+    .prepare("SELECT id, name, key_hash, prefix, created_at, last_used_at, revoked_at, is_active FROM api_keys WHERE key_hash = ?")
     .get(keyHash);
   if (!row) return null;
-  return { ...row, revoked: !!row.revoked_at };
+  return { ...row, active: !!row.is_active, revoked: !!row.revoked_at };
+}
+
+// Pause/resume, the way 9router keeps an isActive flag per key: a disabled key
+// stops working immediately but keeps its secret and its history.
+function setApiKeyActive(id, active) {
+  getDb()
+    .prepare("UPDATE api_keys SET is_active = ? WHERE id = ?")
+    .run(active ? 1 : 0, id);
+  return listApiKeys();
 }
 
 function touchApiKey(id) {
@@ -183,6 +207,15 @@ function revokeApiKey(id) {
 
 function countActiveApiKeys() {
   const row = getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL").get();
+  return row ? Number(row.n) : 0;
+}
+
+// Keys that would actually pass verification. Auto mode counts these, so
+// disabling every key opens the router again instead of locking it.
+function countEnabledApiKeys() {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL AND is_active = 1")
+    .get();
   return row ? Number(row.n) : 0;
 }
 
@@ -206,8 +239,10 @@ module.exports = {
   listApiKeys,
   insertApiKey,
   findApiKeyByHash,
+  setApiKeyActive,
   touchApiKey,
   revokeApiKey,
   countActiveApiKeys,
+  countEnabledApiKeys,
   close,
 };

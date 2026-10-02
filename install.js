@@ -310,10 +310,8 @@ function ensureFirstKey() {
     if (store.countActiveApiKeys() > 0) {
       ok(`${store.countActiveApiKeys()} key(s) already exist — kept (manage them in the dashboard)`);
       return null;
-    }
-    const key = auth.newKey();
+    }    const key = auth.newKey();
     store.insertApiKey({ id: auth.keyId(), name: "default", keyHash: auth.sha256hex(key), prefix: auth.displayPrefix(key) });
-    if (!IS_WIN) { try { fs.chmodSync(DB_PATH, 0o600); } catch { /* best effort */ } }
     ok("created key 'default' — copy it now, it cannot be shown again:");
     console.log(`\n    ${key}\n`);
     return key;

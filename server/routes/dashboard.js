@@ -42,6 +42,7 @@ async function handleDashboard(router, req, res, url) {
 
   if (p === "/api/status") {
     const cfg = configStore.get();
+    const authState = router.authState();
     return sendJson(res, 200, {
       version: "1.0.0",
       uptimeSeconds: Math.floor(process.uptime()),
@@ -56,12 +57,27 @@ async function handleDashboard(router, req, res, url) {
       modelCount: router.modelCache.data?.count ?? null,
       modelsFetchedAt: router.modelCache.data?.fetchedAt ?? null,
       auth: {
-        requireAuth: !!cfg.auth.requireAuth,
+        requireAuth: authState.required,
+        mode: authState.mode,
+        source: authState.source,
         activeKeys: store.countActiveApiKeys(),
-        bootstrapOpen: store.countActiveApiKeys() === 0,
+        enabledKeys: store.countEnabledApiKeys(),
+        bootstrapOpen: store.countEnabledApiKeys() === 0,
       },
       opencode: { configPath: opencodeConfig.configPath() },
     });
+  }
+
+  // auto = require a key once one exists · on = always · off = never
+  if (p === "/api/auth/mode" && req.method === "POST") {
+    try {
+      const b = await parseBody(req);
+      const next = router.setAuthMode(b.mode);
+      logger.info(`[auth] require key mode = ${next.mode} (${next.source})`);
+      return sendJson(res, 200, { ok: true, auth: { ...next, bootstrapOpen: store.countEnabledApiKeys() === 0 } });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
   }
 
   if (p === "/api/opencode/snippet" && req.method === "GET") {

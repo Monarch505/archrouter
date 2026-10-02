@@ -296,6 +296,14 @@
     <div class="sec-head"><span class="t">API keys</span><span class="meta" id="authInfo">-</span></div>
     <div class="panel">
       <div class="row">
+        <span class="sub">Require a key</span>
+        <select id="authMode" class="grow">
+          <option value="auto">auto — only after a key exists</option>
+          <option value="on">on — always</option>
+          <option value="off">off — never</option>
+        </select>
+      </div>
+      <div class="row">
         <input id="keyUnlock" class="grow" placeholder="paste your key to manage (stored in this browser)">
         <button id="btnUseKey" class="btn-s">Use</button>
       </div>
@@ -599,12 +607,25 @@ async function refreshKeys() {
   const d = await r.json();
   $("keyBody").innerHTML = d.keys.map((k) => `
     <tr${k.revoked ? ' style="opacity:.45"' : ""}>
-      <td>${esc(k.name)}</td>
+      <td>${esc(k.name)}${k.revoked ? "" : (k.active ? "" : ' <span class="sub">(off)</span>')}</td>
       <td class="mono">${esc(k.prefix)}</td>
       <td>${fmtTime(k.created_at)}</td>
       <td>${k.last_used_at ? fmtTime(k.last_used_at) : "-"}</td>
-      <td class="num">${k.revoked ? "revoked" : `<button data-revoke="${k.id}" class="btn-s">Revoke</button>`}</td>
+      <td class="num">${k.revoked
+        ? "revoked"
+        : `<button data-toggle="${k.id}" data-active="${k.active ? "1" : "0"}" class="btn-s">${k.active ? "Disable" : "Enable"}</button> <button data-revoke="${k.id}" class="btn-s">Revoke</button>`}</td>
     </tr>`).join("") || `<tr><td colspan="5" class="sub">no keys yet</td></tr>`;
+  for (const b of $("keyBody").querySelectorAll("button[data-toggle]")) {
+    b.onclick = async () => {
+      await fetch("/api/keys/toggle", {
+        method: "POST",
+        headers: apiHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ id: b.dataset.toggle, active: b.dataset.active !== "1" }),
+      });
+      refreshKeys();
+      refreshAuthInfo();
+    };
+  }
   for (const b of $("keyBody").querySelectorAll("button[data-revoke]")) {
     b.onclick = async () => {
       await fetch("/api/keys/revoke", {
@@ -657,11 +678,26 @@ async function refreshAuthInfo() {
     const s = await r.json();
     const a = s.auth || {};
     $("authInfo").textContent = a.requireAuth
-      ? `required · ${a.activeKeys} active`
-      : "open (no key yet)";
+      ? `required · ${a.enabledKeys ?? a.activeKeys} of ${a.activeKeys} keys enabled`
+      : "open";
+    const sel = $("authMode");
+    if (sel.value !== (a.mode || "auto")) sel.value = a.mode || "auto";
+    sel.disabled = !!a.source && a.source !== "auto" && a.source !== "config";
+    sel.title = sel.disabled ? `overridden by ${a.source}` : "";
     $("ocPath").textContent = s.opencode?.configPath || "-";
   } catch {}
 }
+
+$("authMode").onchange = async () => {
+  const r = await fetch("/api/auth/mode", {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ mode: $("authMode").value }),
+  });
+  if (!r.ok) $("authMode").value = "auto";
+  refreshKeys();
+  refreshAuthInfo();
+};
 
 setInterval(refreshStatus, 3000);
 setInterval(refreshPool, 5000);

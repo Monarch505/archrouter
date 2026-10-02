@@ -19,7 +19,10 @@ const DEFAULTS = {
   uaSuffix: "ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
   client: "cli",
   project: "global",
-  auth: { requireAuth: false, apiKey: "sk-opencode-router" },
+  // requireAuthMode is the live switch: "auto" (require a key as soon as one
+  // exists), "on" (always), "off" (never). requireAuth is the older boolean,
+  // kept only so existing configs still load.
+  auth: { requireAuthMode: "auto", requireAuth: false, apiKey: "sk-opencode-router" },
   retries: 3,
   requestTimeoutMs: 120000,
   cooldown: { forbiddenCooldownMs: 60000, episodeWindowMs: 180000 },

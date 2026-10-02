@@ -92,3 +92,26 @@ Chroot/Android note: if sing-box logs `missing default interface` /
 `ARCHROUTER_NET_IF=wlan0` in `~/.archrouter/.env`, then
 `archrouter warp-setup` (regenerates configs, keeps accounts) +
 `archrouter restart`. If the ISP filters UDP 2408, try `ARCHROUTER_WG_PORT=500`.
+
+### API keys
+
+Keys live in the dashboard (`http://127.0.0.1:20399/` → **API keys**), not in
+the CLI. A fresh install prints one `default` key once; only its SHA-256 is
+stored, so it cannot be recovered — create another if you lose it.
+
+Send it as `Authorization: Bearer sk-arch-…` or `x-archrouter-key: sk-arch-…`.
+`?key=` in the URL is refused on purpose (URLs end up in logs and history).
+
+**Require a key** is a three-way switch, stored in SQLite so it survives
+restarts and applied without one:
+
+| mode | behaviour |
+| --- | --- |
+| `auto` (default) | a key is required as soon as an enabled key exists; open before that, so a fresh install cannot lock itself out |
+| `on` | a key is always required |
+| `off` | never required, even with keys present |
+
+Each key also has its own Enable/Disable, so you can pause one client without
+rotating its secret. `ARCHROUTER_REQUIRE_AUTH=1|0` overrides the stored mode
+for that process and `--no-auth` forces it open; both win over the dashboard
+setting, and `archrouter doctor` shows which one is in effect.

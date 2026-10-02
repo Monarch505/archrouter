@@ -131,6 +131,24 @@
         dipaksa, parked tak dilayani, diverge→unpark, shared-IP limit →
         dua-duanya karantina)
 - [ ] P1-4 log console kaya + `archrouter logs`
+- [x] **P1-6 API key + toggle (2026-10-02)** — key dikelola di dashboard, bukan
+      di `archrouter connect`; install baru mencetak satu key `default` sekali.
+      Transport: `Authorization: Bearer` / `x-archrouter-key` (`?key=` ditolak).
+      - `server/lib/auth.js`: `resolveAuthRequired()` +
+        `normalizeMode()`; presedensi `--no-auth` > `ARCHROUTER_REQUIRE_AUTH`
+        > mode tersimpan > auto
+      - mode `auto | on | off` **persisten di SQLite**, berlaku seketika tanpa
+        restart (`router.setAuthMode`, `POST /api/auth/mode`)
+      - per-key Enable/Disable (`api_keys.is_active` + `POST /api/keys/toggle`)
+        ala 9router; key mati ditolak tapi rahasianya tetap ada
+      - `auto` menghitung **key aktif**, jadi mematikan semua key membuka
+        router lagi — tidak pernah terkunci sendiri
+      - **anti-lockout**: `POST /api/auth/mode` tetap terbuka saat tidak ada key
+        aktif (mode `on` + semua key di-revoke tidak=dead end)
+      - migrasi DB lama: `ensureColumn()` menambah `is_active` retroactive
+      - test: `server/test-auth-store.js` **5/5**, `test-p0.js` **45/45**,
+        `scripts/verify-auth-toggle.ps1` **19/19** (instance sekali pakai,
+        port + DB sendiri)
 - [ ] Dashboard pangkas: status, pool, log (SSE), config, test box
 - [ ] Uji: muse-spark via `/v1/responses` 200; thinking-block muncul di log
 - [x] Probe: `reasoning_tokens` chat — primer high → **88** vs eksplisit low →

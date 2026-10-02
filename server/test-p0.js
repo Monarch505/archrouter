@@ -306,6 +306,31 @@ ok("auth: constant-time compare rejects prefix truncation", () => {
   assert.strictEqual(auth.equalConstantTime("sk-arch-abcdef", "sk-arch-abcdeg"), false);
   assert.strictEqual(auth.equalConstantTime("sk-arch-abc", "sk-arch-abcdef"), false);
 });
+ok("auth: disabled key is refused but keeps its identity", () => {
+  const k = auth.newKey();
+  const db = new Map([[auth.sha256hex(k), { id: "k9", active: false, revoked: false }]]);
+  const v = auth.makeVerifier({ lookup: (h) => db.get(h) || null });
+  assert.strictEqual(v(k).ok, false);
+  assert.strictEqual(v(k).reason, "inactive");
+  assert.strictEqual(v(k).id, "k9");
+});
+ok("auth mode: --no-auth beats env, env beats config, config beats auto", () => {
+  const R = auth.resolveAuthRequired;
+  assert.deepStrictEqual(R({ mode: "on", noAuthFlag: true, envFlag: "1" }), { required: false, source: "--no-auth" });
+  assert.deepStrictEqual(R({ mode: "on", envFlag: "0" }), { required: false, source: "ARCHROUTER_REQUIRE_AUTH" });
+  assert.deepStrictEqual(R({ mode: "off", envFlag: "1" }), { required: true, source: "ARCHROUTER_REQUIRE_AUTH" });
+  assert.deepStrictEqual(R({ mode: "on" }), { required: true, source: "config" });
+  assert.deepStrictEqual(R({ mode: "off", activeKeys: 5 }), { required: false, source: "config" });
+});
+ok("auth mode: auto stays open until a usable key exists", () => {
+  const R = auth.resolveAuthRequired;
+  assert.deepStrictEqual(R({ mode: "auto", activeKeys: 0 }), { required: false, source: "auto" });
+  assert.deepStrictEqual(R({ mode: "auto", activeKeys: 1 }), { required: true, source: "auto" });
+  assert.deepStrictEqual(R({ mode: "auto", staticKey: "sk-arch-x" }), { required: true, source: "auto" });
+  assert.strictEqual(auth.normalizeMode("nonsense"), "auto");
+  assert.strictEqual(auth.normalizeMode(undefined), "auto");
+  assert.strictEqual(auth.normalizeMode("on"), "on");
+});
 
 // opencode.json fragment: models come from the live list, variants from
 // modelCaps, and a merge must not disturb other providers.
