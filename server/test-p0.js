@@ -399,5 +399,24 @@ ok("opencode merge: keeps other providers, agents and the top-level model", () =
   assert.strictEqual(merged.agent.explorer.model, "OcRouter/Big-P");
   assert.ok(merged.provider.archrouter.models["mimo-v2.5-free"]);
 });
+ok("opencode minimal entry: no models block, so opencode reads /v1/models itself", () => {
+  const frag = opencodeConfig.buildFragment({ includeModels: false });
+  const p = frag.provider.archrouter;
+  assert.strictEqual(p.npm, "@ai-sdk/openai-compatible");
+  assert.strictEqual(p.options.baseURL, "http://127.0.0.1:20399/v1");
+  assert.strictEqual(p.models, undefined);
+  assert.ok(!("models" in JSON.parse(JSON.stringify(p))), "no models key may reach the file");
+});
+ok("opencode minimal write replaces a stale models block instead of leaving it", () => {
+  const minimal = opencodeConfig.buildFragment({ includeModels: false });
+  const existing = {
+    provider: { archrouter: { models: { "claude-opus-5-5": { name: "claude-opus-5-5" } } }, "9router": { npm: "x" } },
+  };
+  const merged = opencodeConfig.mergeFragment(existing, minimal);
+  assert.strictEqual(merged.provider.archrouter.models, undefined);
+  assert.ok(merged.provider["9router"], "other providers untouched");
+  const onDisk = JSON.parse(JSON.stringify(merged));
+  assert.ok(!("models" in onDisk.provider.archrouter));
+});
 
 console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);

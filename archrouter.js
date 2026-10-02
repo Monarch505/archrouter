@@ -22,7 +22,7 @@
  * value, contradicting its own comment.
  *
  * Usage: archrouter start|stop|restart|status|logs [name]|update
- *        [--check|--no-restart|--force|--full]|rollback|key [name]|warp-setup [--force]
+ *        [--check|--no-restart|--force|--full]|rollback|key [name]|connect-opencode [--variants]|warp-setup [--force]
  *        |warp-reset [a|b]|doctor|version
  */
 
@@ -451,6 +451,48 @@ function cmdKey(nameArg) {
   log(`${store.countActiveApiKeys()} active key(s). The router requires a key on its next start.`);
 }
 
+// Points opencode at this router. Default writes npm + baseURL only, which is
+// enough for opencode to read the catalog from /v1/models itself; --variants
+// additionally writes the static list with per-model effort levels. Needs no
+// running router in the default mode.
+function cmdConnectOpencode(flags) {
+  let variants = false;
+  for (const f of flags) {
+    if (f === "--variants") variants = true;
+    else die(`usage: ${PROG} connect-opencode [--variants]`);
+  }
+  const oc = require(path.join(REPO, "server", "lib", "opencodeConfig.js"));
+  const modelIds = [];
+  if (variants) {
+    const list = httpGetSync(`http://${API_HOST}:${API_PORT}/v1/models`);
+    const data = list?.data || [];
+    for (const m of data) modelIds.push(m.id);
+    if (!modelIds.length) die(`router not answering on :${API_PORT} — start it first, or drop --variants`);
+  }
+  const fragment = oc.buildFragment({ host: API_HOST, port: API_PORT, modelIds, includeModels: variants });
+  const result = oc.writeConfig(fragment);
+  if (!result.ok) die(result.error);
+  log(`opencode provider written to ${result.file} (${result.mode})`);
+  if (result.backup) log(`backup: ${result.backup}`);
+  if (variants) log(`${result.models} models with effort levels.`);
+  else log("opencode now reads the model list from /v1/models, so new free models appear on their own.");
+  log("in opencode: /connect -> Other -> archrouter -> paste your key (see `archrouter key`).");
+}
+
+function httpGetSync(url) {
+  try {
+    const r = spawnSync(process.execPath, ["-e", `
+      const u = ${JSON.stringify(url)};
+      fetch(u).then(r => r.json()).then(j => { process.stdout.write(JSON.stringify(j)); })
+        .catch(() => process.exit(1));
+    `], { encoding: "utf8", timeout: 20000 });
+    if (r.status !== 0) return null;
+    return JSON.parse(r.stdout || "null");
+  } catch {
+    return null;
+  }
+}
+
 function cmdLogs(name) {
   const target = name || "router";
   const file = path.join(LOGS, `${target}.log`);
@@ -590,7 +632,7 @@ async function cmdWarpReset(idArg) {
 
 /* ---------------- dispatch ---------------- */
 
-const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|key [name]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
+const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|key [name]|connect-opencode [--variants]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -608,6 +650,7 @@ async function main() {
     case "update": await cmdUpdate(rest); break;
     case "rollback": await cmdRollback(); break;
     case "key": cmdKey(rest[0]); break;
+    case "connect-opencode": cmdConnectOpencode(rest); break;
     case "warp-setup": cmdWarpSetup(rest); break;
     case "warp-reset": await cmdWarpReset(rest[0]); break;
     default: die(`unknown command '${cmd}' (try: ${PROG} help)`);

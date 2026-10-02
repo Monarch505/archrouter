@@ -326,15 +326,21 @@
     <div class="sec-head"><span class="t">OpenCode</span><span class="meta">/connect</span></div>
     <div class="panel">
       <ol class="sub" style="margin:0 0 var(--space-sm)">
-        <li>create a key above and copy it</li>
+        <li>create a key above and copy it (or run <span class="mono">archrouter key</span>)</li>
+        <li>already done from the shell? <span class="mono">archrouter connect-opencode</span> writes the provider entry for you</li>
         <li>in opencode run <span class="mono">/connect</span> → Other → <span class="mono">archrouter</span> → paste the key</li>
         <li>then <span class="mono">/models</span> → pick <span class="mono">archrouter/&lt;model&gt;</span> and its effort level</li>
       </ol>
       <div class="row">
-        <button id="btnCopyOc" class="btn-s">Copy config</button>
         <button id="btnWriteOc" class="btn-p">Write opencode.json</button>
+        <button id="btnWriteOcMin" class="btn-s">Auto-discovery</button>
       </div>
-      <div class="sub" style="margin-bottom:var(--space-sm)">target: <span class="mono" id="ocPath">-</span></div>
+      <div class="sub" style="margin-bottom:var(--space-sm)">
+        <b>Write opencode.json</b> pins the model list with effort levels (low/medium/high).<br>
+        <b>Auto-discovery</b> writes only baseURL — opencode reads the list from
+        <span class="mono">/v1/models</span>, so new free models appear on their own (no effort picker).
+        <br>target: <span class="mono" id="ocPath">-</span>
+      </div>
       <pre id="ocOut"></pre>
     </div>
   </section>
@@ -656,21 +662,16 @@ $("btnNewKey").onclick = async () => {
   refreshKeys();
 };
 
-$("btnCopyOc").onclick = async () => {
-  const r = await fetch("/api/opencode/snippet", { headers: apiHeaders() });
-  const d = await r.json();
-  const text = JSON.stringify(d.fragment, null, 2);
-  $("ocOut").textContent = text;
-  try { await navigator.clipboard.writeText(text); $("ocOut").textContent = text + "\n\n[copied]"; } catch { $("ocOut").textContent = text + "\n\n[select and copy manually]"; }
-};
-
-$("btnWriteOc").onclick = async () => {
-  const r = await fetch("/api/opencode/write", { method: "POST", headers: apiHeaders() });
+async function writeOpencode(variants) {
+  const r = await fetch(`/api/opencode/write?variants=${variants ? 1 : 0}`, { method: "POST", headers: apiHeaders() });
   const d = await r.json();
   $("ocOut").textContent = r.ok
-    ? `written: ${d.file}\n${d.models} models\nbackup: ${d.backup || "none"}`
-    : `HTTP ${r.status} ${d.error || JSON.stringify(d)}`;
-};
+    ? `written: ${d.file}\nmode: ${d.mode}${d.models ? ` (${d.models} models)` : ""}\nbackup: ${d.backup || "none"}`
+    : `HTTP ${r.status} ${d.error?.message || JSON.stringify(d)}`;
+}
+
+$("btnWriteOc").onclick = () => writeOpencode(true);
+$("btnWriteOcMin").onclick = () => writeOpencode(false);
 
 async function refreshAuthInfo() {
   try {

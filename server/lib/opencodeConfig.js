@@ -1,12 +1,20 @@
 "use strict";
 /*
- * opencodeConfig.js — build the opencode.json provider fragment for archrouter.
+ * opencodeConfig.js — build the opencode.json provider entry for archrouter.
  *
- * opencode reads its model catalog from config, not from /v1/models, so a
- * custom provider has to be described there. Doing that by hand is what makes
- * the 9router setup "primitive": the list goes stale and every model needs
- * typing. This module generates it from the live list plus modelCaps, so the
- * per-model `variants` only advertise effort levels that model really has.
+ * Two shapes, both one command to apply:
+ *
+ *   includeModels: false (default here) — npm + baseURL only. opencode then
+ *     calls archrouter's /v1/models and builds the catalog itself, so a new
+ *     free model shows up without touching this file. The trade-off: effort
+ *     levels are config-driven, so the picker has no low/medium/high.
+ *
+ *   includeModels: true — the model list plus per-model `variants`, generated
+ *     from the live list and modelCaps so only effort levels a model really
+ *     accepts are advertised. Static, but gives the effort picker.
+ *
+ * Only our own key is touched; every other provider, agent and MCP entry in
+ * the user's file is preserved as-is.
  */
 
 const fs = require("fs");
@@ -26,7 +34,17 @@ function configPath() {
   return path.join(base, "opencode.json");
 }
 
-function buildProvider({ host = "127.0.0.1", port = 20399, modelIds = [] } = {}) {
+function buildProvider({ host = "127.0.0.1", port = 20399, modelIds = [], includeModels = true } = {}) {
+  const provider = {
+    npm: PROVIDER_NPM,
+    options: { baseURL: `http://${host}:${port}/v1` },
+  };
+  if (!includeModels) {
+    // Explicitly undefined, so mergeFragment drops a models block written by
+    // an earlier run instead of leaving a stale list behind.
+    provider.models = undefined;
+    return { [PROVIDER_ID]: provider };
+  }
   const models = {};
   for (const raw of modelIds) {
     const id = String(raw).replace(/^(oc|combo)\//, "");
@@ -37,13 +55,8 @@ function buildProvider({ host = "127.0.0.1", port = 20399, modelIds = [] } = {})
     if (variants) entry.variants = variants;
     models[id] = entry;
   }
-  return {
-    [PROVIDER_ID]: {
-      npm: PROVIDER_NPM,
-      options: { baseURL: `http://${host}:${port}/v1` },
-      models,
-    },
-  };
+  provider.models = models;
+  return { [PROVIDER_ID]: provider };
 }
 
 function buildFragment(opts) {
@@ -79,7 +92,14 @@ function writeConfig(fragment, { file = configPath() } = {}) {
   const backup = fs.existsSync(file) ? `${file}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}` : null;
   if (backup) fs.copyFileSync(file, backup);
   fs.writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
-  return { ok: true, file, backup, models: Object.keys(merged.provider[PROVIDER_ID].models).length };
+  const written = merged.provider[PROVIDER_ID]?.models;
+  return {
+    ok: true,
+    file,
+    backup,
+    mode: written ? "static" : "auto-discovery",
+    models: written ? Object.keys(written).length : null,
+  };
 }
 
 module.exports = { PROVIDER_ID, PROVIDER_NPM, configPath, buildProvider, buildFragment, mergeFragment, writeConfig };

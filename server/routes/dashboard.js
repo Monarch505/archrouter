@@ -92,17 +92,26 @@ async function handleDashboard(router, req, res, url) {
     return sendJson(res, 200, { fragment, configPath: opencodeConfig.configPath() });
   }
 
+  // variants=1 writes the static list plus per-model effort levels;
+  // the default writes npm + baseURL only, so opencode discovers the catalog
+  // from /v1/models and never goes stale.
   if (p === "/api/opencode/write" && req.method === "POST") {
     const cfg = configStore.get();
-    const list = await router.modelCache.listOpenAI();
+    const wantVariants = url.searchParams.get("variants") === "1";
+    let modelIds = [];
+    if (wantVariants) {
+      const list = await router.modelCache.listOpenAI();
+      modelIds = (list.data || []).map((m) => m.id);
+    }
     const fragment = opencodeConfig.buildFragment({
       host: cfg.host,
       port: cfg.port,
-      modelIds: (list.data || []).map((m) => m.id),
+      modelIds,
+      includeModels: wantVariants,
     });
     const result = opencodeConfig.writeConfig(fragment);
     if (!result.ok) return sendJson(res, 400, { error: { message: result.error } });
-    logger.info(`[opencode] provider written to ${result.file} (${result.models} models, backup: ${result.backup || "none"})`);
+    logger.info(`[opencode] provider written to ${result.file} (${result.mode}${result.models ? `: ${result.models} models` : ""}, backup: ${result.backup || "none"})`);
     return sendJson(res, 200, result);
   }
 

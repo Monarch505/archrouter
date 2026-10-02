@@ -32,16 +32,7 @@ same-egress-IP invariant.
 
 **No autostart is installed.** Start it yourself when you need it.
 
-Smoke test after install:
-
-```bash
-node scripts/e2e-chat.js
-archrouter status     # pids, egress IPs, invariant_ok
-archrouter doctor     # ports/ownership, binaries, invariant_ok, live warp trace
-```
-
 ## Re-run / update (existing clone)
-
 `git pull` does not restore lost exec bits or discard local edits — use this
 instead (destroys local modifications, keeps `~/.archrouter` accounts + data):
 
@@ -56,8 +47,10 @@ cd ~/archrouter && git fetch origin && git reset --hard origin/main \
 archrouter start | stop | restart | status | logs [router|pool|warp-a|warp-b]
 archrouter update [--check|--no-restart|--force|--full]  # self-update from GitHub + restart
 archrouter rollback                                       # restore pre-update version
-archrouter warp-setup [--force]   # idempotent; --force burns 2 new WARP slots
+archrouter warp-setup [--force]   # 2 WARP accounts + sing-box configs (idempotent; --force burns 2 new slots)
 archrouter warp-reset [a|b]       # bounce one backend (pool coordinator hook)
+archrouter key [name]             # mint another API key
+archrouter connect-opencode [--variants]  # point opencode at this router
 archrouter doctor                 # env / ports / bins / upstream check
 ```
 
