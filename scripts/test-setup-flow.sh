@@ -154,6 +154,25 @@ else bad "no CRLF in the scripts that must run under bash" "CRLF found in:$crlf_
 # clone gets. Checked in the Node suite — a pipe through MSYS text mode adds
 # CR on its own, which would make this assertion lie in both directions.
 
+# --- deploy must not treat a non-fatal bad() as fatal, and must rescue the key
+# before anything that can fail. A real install hit this: install.js exits 1 for
+# a cosmetic check while the stack serves fine, and setup.sh used to abort there
+# and lose the one-and-only API key.
+has "deploy() does not die on a non-zero install.js exit" "$(sed -n '/^deploy()/,/^}/p' "$REPO/setup.sh")" "carrying on"
+if sed -n '/^deploy()/,/^}/p' "$REPO/setup.sh" | grep -q 'die "install.js failed'; then
+  bad "deploy() has no hard abort on install.js failure" "still calls die()"
+else
+  ok "deploy() has no hard abort on install.js failure"
+fi
+
+rescue_line=$(grep -n '^  save_first_key$' "$REPO/setup.sh" | head -1 | cut -d: -f1)
+health_line=$(grep -n '^  if ! wait_healthy' "$REPO/setup.sh" | head -1 | cut -d: -f1)
+if [ -n "$rescue_line" ] && [ -n "$health_line" ] && [ "$rescue_line" -lt "$health_line" ]; then
+  ok "the key is rescued before the health check can fail (line $rescue_line < $health_line)"
+else
+  bad "the key is rescued before the health check can fail" "save_first_key at '${rescue_line:-none}', wait_healthy at '${health_line:-none}'"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

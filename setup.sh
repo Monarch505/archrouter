@@ -248,9 +248,18 @@ deploy() {
   # the pipeline would kill the installer mid-flight.
   ( cd "$REPO_DIR" && node install.js --unattended 2>&1 | tee "$log" )
   local rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] || die "install.js failed (exit $rc). Full log kept at $log"
-  ok "install.js finished"
   INSTALL_LOG="$log"
+
+  # install.js exits 1 when it counted any bad() line, which can be a cosmetic
+  # check (a port probe, an upstream ping) while the stack is in fact serving.
+  # The health check decides, not the exit code — aborting here used to throw
+  # away a working install.
+  if [ "$rc" -ne 0 ]; then
+    warn "install.js reported a problem (exit $rc) — carrying on, the health check below decides"
+    warn "details: grep '\\[!!\\]' $log"
+  else
+    ok "install.js finished"
+  fi
 }
 
 # The key is shown once by design. A user who scrolls past it would be locked
@@ -332,6 +341,8 @@ main() {
   fetch_repo
   persist_path
   deploy
+  # Rescue the key before anything that can fail. It is printed once and only
+  # its hash is stored, so a failure after this point must not cost it.
   save_first_key
 
   command -v archrouter >/dev/null 2>&1 || warn "archrouter not on PATH yet — using absolute path for now"
