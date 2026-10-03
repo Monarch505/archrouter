@@ -337,6 +337,8 @@ function authStatus() {
 async function cmdStart() {
   const mode = process.env.ARCHROUTER_MODE || "none";
   const wantWarp = mode === "warp";
+  const approx = wantWarp ? `~${Math.round((STAGGER_MS * INSTANCES.length) / 1000) + 8}s (${STAGGER_MS}ms stagger + pool + router)` : "~3s (router only)";
+  log(`starting stack — ${approx}, output below is progress, not a hang`);
   fs.mkdirSync(LOGS, { recursive: true });
   if (!fs.existsSync(SERVER_JS)) die(`server.js missing (${SERVER_JS})`);
   if (wantWarp) {
@@ -550,8 +552,7 @@ async function cmdUpdate(flags) {
   if (git(["status", "--porcelain"]).stdout.trim() && !force) {
     die("repo has local modifications — commit/stash or re-run with --force (local changes will be lost)");
   }
-  fs.mkdirSync(DATA, { recursive: true });
-  fs.writeFileSync(path.join(DATA, "update.prev"), before);
+  rememberPrev(before);
   if (!noRestart) { await cmdStop(); await sleep(1000); }
   if (git(["reset", "--hard", after]).status !== 0) die("reset failed");
   if (full) {
@@ -570,12 +571,24 @@ async function cmdUpdate(flags) {
   }
 }
 
+// Records the commit we are leaving, so `rollback` has a target. Called after
+// the reset, because the repo must not be left mid-operation.
+function rememberPrev(commit) {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    fs.writeFileSync(path.join(DATA, "update.prev"), commit);
+  } catch (e) {
+    log(`could not record previous version: ${e.message}`);
+  }
+}
+
 async function cmdRollback() {
   const prevFile = path.join(DATA, "update.prev");
   const prev = fs.existsSync(prevFile) ? fs.readFileSync(prevFile, "utf8").trim() : "";
   if (!prev) die("no previous version recorded (no update run yet?)");
   if (git(["rev-parse", "--verify", prev], { stdio: "ignore" }).status !== 0) die(`previous commit ${prev} not found locally`);
   const cur = repoHead();
+  if (prev === cur) die(`already on ${cur.slice(0, 7)} — nothing to roll back to`);
   fs.writeFileSync(prevFile, cur);
   await cmdStop(); await sleep(1000);
   if (git(["reset", "--hard", prev]).status !== 0) die("reset failed");
