@@ -389,15 +389,23 @@ async function unattended() {
   if (run(["start"], "start")) ok("stack started");
   else die("start failed — see ~/.archrouter/data/logs/*.log");
 
-  await new Promise((r) => setTimeout(r, 3000));
-  const health = await new Promise((resolve) => {
-    const port = process.env.ARCHROUTER_PORT || "20399";
-    const req = require("http").get(`http://127.0.0.1:${port}/health`, { timeout: 4000 }, (res) => {
-      let b = ""; res.on("data", (c) => { b += c; }); res.on("end", () => resolve(b));
+  // The stack needs real time on a fresh install: warp-a, then an 8s stagger,
+  // then warp-b, then the pool, and only then does the router bind. A fixed 3s
+  // wait reported "no response" on hardware that was perfectly healthy, so poll.
+  const healthDeadline = Date.now() + Number(process.env.ARCHROUTER_HEALTH_TIMEOUT_MS || 90000);
+  let health = null;
+  while (Date.now() < healthDeadline) {
+    health = await new Promise((resolve) => {
+      const port = process.env.ARCHROUTER_PORT || "20399";
+      const req = require("http").get(`http://127.0.0.1:${port}/health`, { timeout: 4000 }, (res) => {
+        let b = ""; res.on("data", (c) => { b += c; }); res.on("end", () => resolve(b));
+      });
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => { try { req.destroy(); } catch {} resolve(null); });
     });
-    req.on("error", () => resolve(null));
-    req.on("timeout", () => { try { req.destroy(); } catch {} resolve(null); });
-  });
+    if (health) break;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
   health ? ok(`router /health → ${health.slice(0, 80)}`) : bad("router /health no response");
 
   // The invariant is the whole point of the two-account setup: verify it.

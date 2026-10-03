@@ -337,15 +337,39 @@ main() {
   printf '%sarchrouter setup%s — one command, then it just runs.%s\n' "$B" "$B" "$N"
   [ "$(id -u)" = "0" ] && info "running as root — fine, no service is installed"
 
-  install_node || exit 1
+  # ~/.local/bin is on PATH for future shells but not the one running this script,
+# so `archrouter` would be "command not found" the moment setup finishes. Linking
+# into a directory that is already on PATH fixes it for this shell too.
+ensure_callable_now() {
+  if command -v archrouter >/dev/null 2>&1; then
+    ok "archrouter is callable in this shell"
+    return 0
+  fi
+  local target
+  for target in /usr/local/bin /usr/bin; do
+    if [ -d "$target" ] && [ -w "$target" ]; then
+      if ln -sf "$HOME/.local/bin/archrouter" "$target/archrouter" 2>/dev/null; then
+        case ":$PATH:" in *":$target:"*) ;; *) PATH="$target:$PATH"; export PATH;; esac
+        ok "linked archrouter into $target so it works right now"
+        return 0
+      fi
+    fi
+  done
+  warn "archrouter will only be callable in a NEW terminal — run this once:"
+  printf '      source %s/.bashrc\n' "$HOME"
+  printf '      (or use: node %s/archrouter.js status)\n' "$REPO_DIR"
+  return 1
+}
+
+install_node || exit 1
   fetch_repo
   persist_path
   deploy
   # Rescue the key before anything that can fail. It is printed once and only
   # its hash is stored, so a failure after this point must not cost it.
   save_first_key
-
-  command -v archrouter >/dev/null 2>&1 || warn "archrouter not on PATH yet — using absolute path for now"
+  CALLABLE=1
+  ensure_callable_now || CALLABLE=0
 
   if ! wait_healthy; then
     printf '\n%sStill not answering. Diagnostics:%s\n' "$Y" "$N"
@@ -360,6 +384,9 @@ main() {
 
   local dash="http://127.0.0.1:$API_PORT/"
   printf '\n%s%sDONE%s  archrouter is running.\n\n' "$G" "$B" "$N"
+  if [ "${CALLABLE:-1}" = "0" ]; then
+    printf '  %sfirst: source %s/.bashrc  (or open a new terminal)%s\n\n' "$Y" "$HOME" "$N"
+  fi
   cat <<EOF
   dashboard   $dash
   models      only the -free tier; paid ids are refused

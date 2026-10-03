@@ -173,6 +173,46 @@ else
   bad "the key is rescued before the health check can fail" "save_first_key at '${rescue_line:-none}', wait_healthy at '${health_line:-none}'"
 fi
 
+# --- PATH must work in the shell that ran setup, not just the next one -------
+# A first real run ended at "archrouter: command not found": ~/.local/bin is in
+# ~/.bashrc, which the already-open shell had not read.
+if grep -q 'ensure_callable_now' "$REPO/setup.sh"; then
+  ok "setup.sh makes archrouter callable in the current shell"
+else
+  bad "setup.sh makes archrouter callable in the current shell" "ensure_callable_now missing"
+fi
+if sed -n '/^ensure_callable_now()/,/^}/p' "$REPO/setup.sh" | grep -q '/usr/local/bin'; then
+  ok "ensure_callable_now links into a directory already on PATH"
+else
+  bad "ensure_callable_now links into a directory already on PATH" "no /usr/local/bin attempt"
+fi
+if sed -n '/^ensure_callable_now()/,/^}/p' "$REPO/setup.sh" | grep -q 'bashrc'; then
+  ok "ensure_callable_now falls back to telling the user to source ~/.bashrc"
+else
+  bad "ensure_callable_now falls back to telling the user to source ~/.bashrc" "no fallback message"
+fi
+
+# --- install.js must poll for /health, not sleep a fixed 3s -------------------
+# On a fresh install the stack needs ~20s (8s stagger + pool + router), so the
+# fixed wait reported "router /health no response" on a healthy machine.
+if grep -q 'healthDeadline' "$REPO/install.js"; then
+  ok "install.js polls /health until it answers"
+else
+  bad "install.js polls /health until it answers" "no healthDeadline"
+fi
+# The real invariant: the check is inside a retry loop, not a one-shot after a
+# fixed sleep. A 3s interval between retries is fine.
+if grep -q 'while (Date.now() < healthDeadline)' "$REPO/install.js"; then
+  ok "the /health check is retried in a loop"
+else
+  bad "the /health check is retried in a loop" "no retry loop around the health check"
+fi
+if grep -q 'ARCHROUTER_HEALTH_TIMEOUT_MS' "$REPO/install.js"; then
+  ok "the retry budget is overridable (ARCHROUTER_HEALTH_TIMEOUT_MS)"
+else
+  bad "the retry budget is overridable" "no env override"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
