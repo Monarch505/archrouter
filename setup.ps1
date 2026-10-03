@@ -169,26 +169,27 @@ function Wire-Opencode {
   else { Warn2 "could not write opencode.json — run: archrouter connect-opencode" }
 }
 
-Write-Host "archrouter setup - one command, then it just runs." -ForegroundColor White
-Install-Node
-Get-Repo
-Add-ToPath
-$log = Deploy
-Save-FirstKey $log
+function Invoke-Setup {
+  Write-Host "archrouter setup - one command, then it just runs." -ForegroundColor White
+  Install-Node
+  Get-Repo
+  Add-ToPath
+  $log = Deploy
+  Save-FirstKey $log
 
-if (-not (Wait-Healthy)) {
-  Write-Host "`nStill not answering. Diagnostics:" -ForegroundColor Yellow
-  & node (Join-Path $Dir "archrouter.js") doctor
-  Die "setup did not reach a healthy state"
-}
+  if (-not (Wait-Healthy)) {
+    Write-Host "`nStill not answering. Diagnostics:" -ForegroundColor Yellow
+    & node (Join-Path $Dir "archrouter.js") doctor
+    Die "setup did not reach a healthy state"
+  }
 
-Step "Status"
-& node (Join-Path $Dir "archrouter.js") status
+  Step "Status"
+  & node (Join-Path $Dir "archrouter.js") status
 
-if (-not $NoOpencode) { Wire-Opencode }
+  if (-not $NoOpencode) { Wire-Opencode }
 
-Write-Host "`nDONE  archrouter is running." -ForegroundColor Green
-Write-Host @"
+  Write-Host "`nDONE  archrouter is running." -ForegroundColor Green
+  Write-Host @"
 
   dashboard   http://127.0.0.1:$Port/
   models      only the -free tier; paid ids are refused
@@ -201,3 +202,8 @@ Write-Host @"
 
   If the key scrolled away: create another with  archrouter key
 "@ -ForegroundColor Gray
+}
+
+# Dot-sourcing with ARCHROUTER_SETUP_LIB=1 defines the helpers without running
+# anything, which is what scripts/test-setup-ps1.ps1 relies on.
+if ($env:ARCHROUTER_SETUP_LIB -ne "1") { Invoke-Setup }
