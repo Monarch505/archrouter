@@ -521,11 +521,32 @@ function stripPathBlock(file) {
 // belongs to THIS repo. Matching a bare "archrouter.js" substring is not enough
 // — another install's shim contains it too, and deleting that would break an
 // unrelated working setup.
+//
+// realpathSync is the first proof, but it THROWS on a dangling link — which is
+// exactly what /usr/local/bin/archrouter becomes once the personal shim it
+// points at is gone — and a plain catch used to answer "not ours", leaving a
+// dead symlink behind. So when resolution fails, fall back to readlink and
+// judge the target the link was created for.
 function shimIsOurs(p) {
+  const repoReal = (() => { try { return fs.realpathSync(REPO); } catch { return path.resolve(REPO); } })();
+  const inRepo = (abs) => abs === repoReal || abs.startsWith(repoReal + path.sep);
+  let resolved = null;
+  try { resolved = fs.realpathSync(p); } catch { /* dangling or vanished */ }
+  if (resolved) {
+    if (inRepo(resolved)) return true;
+  } else {
+    try {
+      const t = fs.readlinkSync(p);
+      const abs = path.isAbsolute(t) ? t : path.resolve(path.dirname(p), t);
+      if (inRepo(abs)) return true;
+      // Two-step link: /usr/local/bin/archrouter -> ~/.local/bin/archrouter.
+      // The shim dir is ours by construction, so a link at our name pointing
+      // back into it is ours even when it no longer resolves.
+      const shimDir = path.join(os.homedir(), ".local", "bin");
+      if (abs === shimDir || abs.startsWith(shimDir + path.sep)) return true;
+    } catch { /* not a symlink after all — fall through to the body check */ }
+  }
   try {
-    const link = fs.realpathSync(p);
-    const repoReal = fs.realpathSync(REPO);
-    if (link === repoReal || link.startsWith(repoReal + path.sep)) return true;
     const target = path.join(REPO, "archrouter.js");
     const body = fs.readFileSync(p, "utf8");
     return body.includes(target) || body.includes(target.replace(/\\/g, "/"));
@@ -561,8 +582,10 @@ async function cmdUninstall(flags) {
 
   const removed = [];
   const kept = [];
+  // lstat, not existsSync: existsSync reports a dangling symlink as missing,
+  // which would leave it behind — the one case cleanup must not miss.
   const rmFile = (p, label) => {
-    if (!fs.existsSync(p)) return;
+    try { fs.lstatSync(p); } catch { return; }
     try { fs.rmSync(p, { force: true }); removed.push(label); }
     catch (e) { kept.push(`${label} (${e.message})`); }
   };
@@ -572,10 +595,14 @@ async function cmdUninstall(flags) {
     catch (e) { kept.push(`${label} (${e.message})`); }
   };
 
-  for (const d of [path.join(os.homedir(), ".local", "bin"), "/usr/local/bin", "/usr/bin"]) {
+  // System dirs first: /usr/local/bin/archrouter is a link INTO ~/.local/bin,
+  // so removing the personal shim first would strand it. The dangling case is
+  // handled either way (shimIsOurs falls back to readlink), this just keeps
+  // the common path honest.
+  for (const d of ["/usr/local/bin", "/usr/bin", path.join(os.homedir(), ".local", "bin")]) {
     for (const name of ["archrouter", "archrouter.cmd", "archrouter.ps1"]) {
       const p = path.join(d, name);
-      if (!fs.existsSync(p)) continue;
+      try { fs.lstatSync(p); } catch { continue; }
       if (!shimIsOurs(p)) { kept.push(`${p} (not created by archrouter, left alone)`); continue; }
       rmFile(p, p);
     }

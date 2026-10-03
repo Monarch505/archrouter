@@ -8,6 +8,7 @@
  *   combos(name TEXT UNIQUE, model TEXT, added_at TEXT)
  */
 
+const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { DatabaseSync } = require("node:sqlite");
@@ -25,7 +26,7 @@ const BASE_DIR =
 const DATA_DIR = BASE_DIR === path.join(__dirname, "..")
   ? BASE_DIR
   : path.join(BASE_DIR, "data");
-try { require("fs").mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const DB_PATH = path.join(DATA_DIR, "archrouter.db");
 
 let db = null;
@@ -33,6 +34,13 @@ let db = null;
 function getDb() {
   if (db) return db;
   db = new DatabaseSync(DB_PATH);
+  // This file holds the SHA-256 of every API key: the umask default (0644)
+  // would let any local account read it. Runs on every open, so databases
+  // created before this line get tightened on the next start too. Windows has
+  // no POSIX modes worth setting here.
+  if (process.platform !== "win32") {
+    try { fs.chmodSync(DB_PATH, 0o600); } catch { /* best effort */ }
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS proxies (
       url      TEXT PRIMARY KEY,

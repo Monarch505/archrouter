@@ -112,6 +112,16 @@ ok("disabling every key leaves auto mode open instead of locking out", () => {
   assert.strictEqual(state.required, false);
 });
 
+// The DB holds only hashes, but hashes are crackable offline: 0644 (the
+// default umask) would hand them to every local account. getDb() must chmod
+// 600 on open — including on a file an older version created as 0644, which is
+// exactly the file this suite just built with the legacy schema.
+ok(`the api-key database is mode 600${process.platform === "win32" ? " (skipped: no POSIX modes on Windows)" : ""}`, () => {
+  if (process.platform === "win32") return;
+  const mode = fs.statSync(DB_PATH).mode & 0o777;
+  assert.strictEqual(mode, 0o600, `expected 0600, got ${mode.toString(8)}`);
+});
+
 store.close();
 fs.rmSync(HOME, { recursive: true, force: true });
 console.log(`\n${pass} passed`);

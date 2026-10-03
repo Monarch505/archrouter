@@ -165,6 +165,49 @@ has "purge warns that the keys are gone for good" "$out3" "key"
 has "purge explains WARP accounts must be registered again" "$out3" "warp-setup"
 
 # ---------------------------------------------------------------------------
+# Dangling symlinks. existsSync() reports them as missing and realpathSync()
+# throws on them, so the old scan skipped our dead link and refused the
+# foreign one — a real /usr/local/bin install always left one behind.
+# This run gets its own HOME so the fixtures cannot collide with the ones
+# above. Our links must go, theirs must stay, link for link.
+# ---------------------------------------------------------------------------
+DBOX="$TMP/dangling-home"
+DBIN="$DBOX/.local/bin"
+R4=$(fresh_repo)
+mkdir -p "$DBIN"
+if DBIN="$DBIN" REPLICA_REPO="$R4" FOREIGN_GHOST="$TMP/other-install" node -e '
+  const fs = require("fs"), path = require("path");
+  const dir = process.env.DBIN;
+  // ours: points back into our own shim dir (no longer resolves)
+  fs.symlinkSync(path.join(dir, "ghost-target"), path.join(dir, "archrouter"));
+  // ours: resolves into the replica repo that runs this uninstall
+  fs.symlinkSync(path.join(process.env.REPLICA_REPO, "archrouter.js"), path.join(dir, "archrouter.cmd"));
+  // theirs: dead link belonging to some other install
+  fs.symlinkSync(path.join(process.env.FOREIGN_GHOST, "gone"), path.join(dir, "archrouter.ps1"));
+' 2>/dev/null && [ -L "$DBIN/archrouter" ]; then
+  out4=$(HOME="$DBOX" USERPROFILE="$DBOX" \
+         node "$R4/archrouter.js" uninstall --yes 2>&1); rc4=$?
+  is "uninstall with dangling links exits 0" "$rc4" "0"
+  if [ -e "$DBIN/archrouter" ] || [ -L "$DBIN/archrouter" ]; then
+    bad "our dangling shim is removed" "still linked at ~/.local/bin/archrouter"
+  else
+    ok "our dangling shim is removed"
+  fi
+  if [ -e "$DBIN/archrouter.cmd" ] || [ -L "$DBIN/archrouter.cmd" ]; then
+    bad "a shim resolving into this repo is removed" "still present"
+  else
+    ok "a shim resolving into this repo is removed"
+  fi
+  if [ -L "$DBIN/archrouter.ps1" ]; then
+    ok "a foreign dangling link is left alone"
+  else
+    bad "a foreign dangling link is left alone" "it was deleted"
+  fi
+else
+  bad "could not create a dangling symlink fixture" "symlink not supported here"
+fi
+
+# ---------------------------------------------------------------------------
 # Nothing outside the two roots was touched: the real repo, this machine's
 # real profile, and files we only removed a block from.
 # ---------------------------------------------------------------------------
@@ -194,6 +237,27 @@ for label in "router after update" "router after rollback"; do
     bad "both restart paths poll ($label)" "call not found"
   fi
 done
+
+# --- shim scan must not be fooled by dangling links -------------------------
+# existsSync() says "missing" for a dead symlink and realpathSync() throws on
+# it; without lstat + a readlink fallback, /usr/local/bin/archrouter survives
+# every uninstall as a dead link (this is what the behavioural fixture above
+# exercises).
+if grep -q 'fs.lstatSync(p)' "$REPO/archrouter.js"; then
+  ok "the shim scan uses lstat (sees dangling links)"
+else
+  bad "the shim scan uses lstat (sees dangling links)" "no lstatSync in the scan"
+fi
+if grep -q 'fs.readlinkSync(p)' "$REPO/archrouter.js"; then
+  ok "ownership falls back to readlink when realpath fails"
+else
+  bad "ownership falls back to readlink when realpath fails" "no readlinkSync"
+fi
+if grep -qF 'for (const d of ["/usr/local/bin", "/usr/bin", path.join(os.homedir(), ".local", "bin")])' "$REPO/archrouter.js"; then
+  ok "system shim dirs are scanned before ~/.local/bin"
+else
+  bad "system shim dirs are scanned before ~/.local/bin" "expected order not found"
+fi
 
 echo
 echo "$pass passed, $fail failed"
