@@ -142,6 +142,22 @@ echo "# user's own zshrc" > "$EXISTZ/.zshrc"
 is "an existing ~/.zshrc still receives the block" \
    "$(grep -c 'archrouter (added by setup.sh)' "$EXISTZ/.zshrc" 2>/dev/null)" "1"
 
+# --- set_env_var: --port must survive into .env, not just this shell ---------
+ENVF="$TMP/envfile"
+printf 'ARCHROUTER_PORT=20399\nARCHROUTER_HOST=127.0.0.1\n' > "$ENVF"
+set_env_var "$ENVF" ARCHROUTER_PORT 30500
+is "set_env_var replaces an existing assignment" \
+   "$(grep '^ARCHROUTER_PORT=' "$ENVF")" "ARCHROUTER_PORT=30500"
+is "set_env_var leaves the other keys alone" \
+   "$(grep -c '^ARCHROUTER_HOST=' "$ENVF")" "1"
+set_env_var "$ENVF" ARCHROUTER_HOST 0.0.0.0
+is "set_env_var appends a missing key" \
+   "$(grep '^ARCHROUTER_HOST=' "$ENVF")" "ARCHROUTER_HOST=0.0.0.0"
+is "set_env_var does not duplicate the replaced key" \
+   "$(grep -c '^ARCHROUTER_PORT=' "$ENVF")" "1"
+set_env_var "$TMP/does-not-exist.env" ARCHROUTER_PORT 1
+ok "set_env_var on a missing file is a no-op, not a crash"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

@@ -18,6 +18,7 @@
  *        --skip-bins   don't download binaries
  *        --reinstall-bins  force re-download
  *        --offline     skip OS packages AND downloads
+ *        --no-warp     skip warp-setup and pin ARCHROUTER_MODE=none (serve direct)
  */
 
 const fs = require("fs");
@@ -40,6 +41,7 @@ const SKIP_BINS = has("--skip-bins");
 const REINSTALL = has("--reinstall-bins");
 const OFFLINE = has("--offline");
 const UNATTENDED = has("--unattended");
+const NO_WARP = has("--no-warp");
 if (has("--offline") && UNATTENDED) { console.error("[install] ERROR: --unattended + --offline conflict"); process.exit(1); }
 
 const HOME_DIR = process.env.HOME || (() => { try { return os.homedir(); } catch { return null; } })();
@@ -292,6 +294,22 @@ function writeEnv() {
     fs.writeFileSync(envFile, text);
     ok(`.env written → ${envFile}`);
   }
+
+  // --no-warp must survive the install: .env.example pins ARCHROUTER_MODE=warp,
+  // and an existing .env may too. Leaving it there would make the next
+  // `archrouter start` load WARP mode without warp-setup ever having run —
+  // exactly the "flag parsed but ignored" trap this flag used to fall into.
+  if (NO_WARP) {
+    let text = fs.readFileSync(envFile, "utf8");
+    if (/^ARCHROUTER_MODE=/m.test(text)) {
+      text = text.replace(/^ARCHROUTER_MODE=.*$/m, "ARCHROUTER_MODE=none");
+    } else {
+      text += "ARCHROUTER_MODE=none\n";
+    }
+    fs.writeFileSync(envFile, text);
+    process.env.ARCHROUTER_MODE = "none";
+    ok(".env: ARCHROUTER_MODE=none (serve direct, WARP skipped)");
+  }
 }
 
 /* ---------------- first API key ----------------
@@ -417,8 +435,13 @@ async function unattended() {
     if (r.status !== 0) { bad(`${label} failed (exit ${r.status})`); return false; }
     return true;
   };
-  if (run(["warp-setup"], "warp-setup")) ok("warp accounts + sing-box configs ready");
-  else die("warp-setup failed — fix the errors above, then re-run");
+  if (NO_WARP) {
+    info("--no-warp: skipping warp-setup (no accounts registered, mode=none)");
+  } else if (run(["warp-setup"], "warp-setup")) {
+    ok("warp accounts + sing-box configs ready");
+  } else {
+    die("warp-setup failed — fix the errors above, then re-run");
+  }
   if (run(["start"], "start")) ok("stack started");
   else die("start failed — see ~/.archrouter/data/logs/*.log");
 
@@ -440,6 +463,11 @@ async function unattended() {
     await new Promise((r) => setTimeout(r, 3000));
   }
   health ? ok(`router /health → ${health.slice(0, 80)}`) : bad("router /health no response");
+
+  if (NO_WARP) {
+    info("--no-warp: no WARP backends — pool invariant not applicable");
+    return;
+  }
 
   // The invariant is the whole point of the two-account setup: verify it.
   const statusPort = process.env.ARCHROUTER_STATUS_PORT || "9190";
@@ -494,7 +522,18 @@ where keys are created, revoked and the opencode.json fragment is written for yo
 `);
   }
   if (!UNATTENDED) {
-    console.log(`
+    if (NO_WARP) {
+      console.log(`
+next:
+  archrouter start           # start the router (mode=none — WARP was skipped)
+  archrouter doctor          # checks ports, binaries, upstream
+  archrouter status          # pids + API health
+  archrouter stop
+
+no autostart was installed — start it yourself whenever you need it.
+`);
+    } else {
+      console.log(`
 next:
   archrouter warp-setup     # register 2 WARP accounts + generate sing-box configs
   archrouter start           # start warp-a/warp-b + pool + router (mode=warp)
@@ -504,6 +543,7 @@ next:
 
 no autostart was installed — start it yourself whenever you need it.
 `);
+    }
   }
   process.exit(failures ? 1 : 0);
 })().catch((e) => die(e && e.stack ? e.stack : String(e)));

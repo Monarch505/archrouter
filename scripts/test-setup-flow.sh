@@ -77,6 +77,20 @@ ARCHROUTER_REPO_URL="$BARE" ARCHROUTER_DIR="$REPO_DIR" fetch_repo >"$TMP/clean.o
 if [ -f "$REPO_DIR/two.txt" ]; then ok "clean tree is fast-forwarded to origin/main"; else bad "clean tree is fast-forwarded to origin/main" "two.txt missing; HEAD=$(git -C "$REPO_DIR" log --oneline -1 2>&1); tree=$(git -C "$REPO_DIR" ls-tree --name-only HEAD 2>&1 | tr '\n' ' '); said: $(tr '\n' '|' < "$TMP/clean.out")"; fi
 is "HEAD is back on the remote tip" "$(git -C "$REPO_DIR" rev-parse HEAD)" "$(git -C "$REPO_DIR" rev-parse origin/main)"
 
+# A non-empty directory that is not a clone: git clone refuses it, and the old
+# blanket error blamed the user's internet connection for that.
+NOTGIT="$TMP/not-a-clone"
+mkdir -p "$NOTGIT"
+echo "precious data" > "$NOTGIT/file.txt"
+real_rd="$REPO_DIR"
+REPO_DIR="$NOTGIT"
+notgit_out=$(ARCHROUTER_REPO_URL="$BARE" fetch_repo 2>&1); notgit_rc=$?
+REPO_DIR="$real_rd"
+is "fetch_repo refuses a non-empty non-git directory" "$notgit_rc" "1"
+has "the refusal says what is actually wrong" "$notgit_out" "not a git clone"
+hasnt "the refusal does not blame the internet" "$notgit_out" "internet"
+has "the refusal keeps the user's files" "$(cat "$NOTGIT/file.txt")" "precious data"
+
 # --------------------------------------------------------------- persist_path --
 persist_path >/dev/null 2>&1
 is "persist_path wrote the marker to ~/.bashrc" "$?" "0"
@@ -237,6 +251,60 @@ if grep -q 'persistPathPosix()' "$REPO/install.js"; then
   ok "the POSIX shim path actually calls persistPathPosix"
 else
   bad "the POSIX shim path actually calls persistPathPosix" "never called"
+fi
+
+# --- --no-warp must reach install.js and survive into .env -------------------
+# WANT_WARP was assigned by the parser and never read anywhere: the flag
+# skipped nothing and pinned nothing, so `setup.sh --no-warp` produced a stack
+# that still tried to start WARP.
+STUB="$TMP/stub-repo"
+mkdir -p "$STUB"
+cat > "$STUB/install.js" <<'EOF'
+require("fs").writeFileSync(process.env.STUB_ARGV_FILE, JSON.stringify(process.argv.slice(2)));
+EOF
+export STUB_ARGV_FILE="$TMP/stub-argv.txt"
+REAL_REPO_DIR="$REPO_DIR"
+REPO_DIR="$STUB"
+WANT_WARP=0 deploy >/dev/null 2>&1
+is "deploy() forwards --no-warp when WANT_WARP=0" \
+   "$(cat "$STUB_ARGV_FILE" 2>/dev/null)" '["--unattended","--no-warp"]'
+is "deploy() exports ARCHROUTER_MODE=none for the run" "${ARCHROUTER_MODE:-}" "none"
+unset ARCHROUTER_MODE
+WANT_WARP=1 deploy >/dev/null 2>&1
+is "deploy() does NOT forward --no-warp by default" \
+   "$(cat "$STUB_ARGV_FILE" 2>/dev/null)" '["--unattended"]'
+REPO_DIR="$REAL_REPO_DIR"
+
+# install.js side: the flag must gate warp-setup and rewrite .env, otherwise
+# the next `archrouter start` reads ARCHROUTER_MODE=warp from .env.example.
+if grep -q 'const NO_WARP = has("--no-warp")' "$REPO/install.js"; then
+  ok "install.js reads the --no-warp flag"
+else
+  bad "install.js reads the --no-warp flag" "NO_WARP not defined from argv"
+fi
+if grep -q 'skipping warp-setup' "$REPO/install.js"; then
+  ok "install.js skips warp-setup under --no-warp"
+else
+  bad "install.js skips warp-setup under --no-warp" "no NO_WARP gate on warp-setup"
+fi
+if grep -qF 'ARCHROUTER_MODE=none' "$REPO/install.js" && grep -qF 'text.replace(/^ARCHROUTER_MODE=' "$REPO/install.js"; then
+  ok "install.js rewrites ARCHROUTER_MODE in .env under --no-warp"
+else
+  bad "install.js rewrites ARCHROUTER_MODE in .env under --no-warp" "no .env rewrite"
+fi
+
+# --- --port must be written into .env, not just exported for this shell ------
+# The export died with the terminal: .env (from .env.example, 20399) won in
+# every later one, so --port silently reverted.
+if grep -q 'PORT_GIVEN' "$REPO/setup.sh"; then
+  ok "setup.sh tracks whether --port was passed"
+else
+  bad "setup.sh tracks whether --port was passed" "PORT_GIVEN missing"
+fi
+if grep -qE 'set_env_var .* ARCHROUTER_PORT' "$REPO/setup.sh"; then
+  ok "setup.sh writes ARCHROUTER_PORT into .env"
+else
+  bad "setup.sh writes ARCHROUTER_PORT into .env" "no set_env_var call"
 fi
 
 echo

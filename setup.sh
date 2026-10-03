@@ -28,6 +28,9 @@ WANT_WARP=1
 WANT_OPENCODE=1
 REPO_DIR="${ARCHROUTER_DIR:-$HOME/archrouter}"
 API_PORT="${ARCHROUTER_PORT:-20399}"
+# Set only when --port was actually passed: the default 20399 is already in
+# .env.example, so writing it back would be noise.
+PORT_GIVEN=0
 
 # ---------------------------------------------------------------- output ----
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -207,6 +210,13 @@ fetch_repo() {
   local parent
   parent=$(dirname "$REPO_DIR")
   mkdir -p "$parent" || die "cannot create $parent"
+  # A non-empty directory that is not a clone (copied files, a half-finished
+  # attempt, someone's own project): git clone refuses it with "destination
+  # path already exists", and the blanket error below used to blame the user's
+  # internet connection for that.
+  if [ -d "$REPO_DIR" ] && [ ! -d "$REPO_DIR/.git" ] && [ -n "$(ls -A "$REPO_DIR" 2>/dev/null)" ]; then
+    die "$REPO_DIR already exists but is not a git clone — move it away (or delete it) and re-run"
+  fi
   info "cloning $repo_url -> $REPO_DIR"
   git clone --depth 1 "$repo_url" "$REPO_DIR" || die "git clone failed. Check your internet connection."
   ok "cloned"
@@ -263,6 +273,16 @@ persist_path() {
   [ "$changed" = "1" ] && ok "~/.local/bin added to PATH (new terminals too)" || ok "PATH already set"
 }
 
+# Set KEY=VALUE inside a dotenv file: replace the assignment when it exists,
+# append when it does not. A plain rewrite instead of `sed -i` so GNU and BSD
+# sed behave identically.
+set_env_var() {
+  local f="$1" k="$2" v="$3" tmp="$1.tmp.$$"
+  [ -f "$f" ] || return 0
+  { grep -v "^$k=" "$f" || true; printf '%s=%s\n' "$k" "$v"; } > "$tmp"
+  mv -f "$tmp" "$f"
+}
+
 # --------------------------------------------------------------- deploy ----
 deploy() {
   step "Deploy (warp accounts, binaries, stack)"
@@ -271,9 +291,19 @@ deploy() {
   local log="$HOME/.archrouter/data/logs/install.log"
   mkdir -p "$(dirname "$log")"
 
+  # --no-warp used to be parsed and then ignored (WANT_WARP was never read
+  # anywhere), so the flag did nothing at all. Forward it so install.js skips
+  # warp-setup and pins ARCHROUTER_MODE=none into .env — and export it here too
+  # so the `archrouter start` this very run spawns already sees mode=none.
+  local -a cmd=(node install.js --unattended)
+  if [ "$WANT_WARP" = "0" ]; then
+    cmd+=(--no-warp)
+    export ARCHROUTER_MODE=none
+  fi
+
   # tee, never head/tail: this prints the one-and-only API key and truncating
   # the pipeline would kill the installer mid-flight.
-  ( cd "$REPO_DIR" && node install.js --unattended 2>&1 | tee "$log" )
+  ( cd "$REPO_DIR" && "${cmd[@]}" 2>&1 | tee "$log" )
   local rc=${PIPESTATUS[0]}
   INSTALL_LOG="$log"
 
@@ -355,7 +385,7 @@ main() {
       --no-warp) WANT_WARP=0; shift;;
       --no-opencode) WANT_OPENCODE=0; shift;;
       --dir) REPO_DIR="$2"; shift 2;;
-      --port) API_PORT="$2"; export ARCHROUTER_PORT="$2"; shift 2;;
+      --port) API_PORT="$2"; export ARCHROUTER_PORT="$2"; PORT_GIVEN=1; shift 2;;
       -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
       *) die "unknown option '$1' (try --help)";;
     esac
@@ -392,6 +422,12 @@ install_node || exit 1
   fetch_repo
   persist_path
   deploy
+  # --port only ever lived in this shell's environment; .env (written from
+  # .env.example, 20399) won in every later terminal. Persist the choice there.
+  if [ "$PORT_GIVEN" = "1" ]; then
+    set_env_var "${ARCHROUTER_HOME:-$HOME/.archrouter}/.env" ARCHROUTER_PORT "$API_PORT"
+    ok "ARCHROUTER_PORT=$API_PORT saved to .env (keeps working in new terminals)"
+  fi
   # Rescue the key before anything that can fail. It is printed once and only
   # its hash is stored, so a failure after this point must not cost it.
   save_first_key
