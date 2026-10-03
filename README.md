@@ -6,14 +6,41 @@ native Windows**. No Docker anywhere: `wgcf` + `sing-box` run natively.
 
 ## One-liner
 
+Install, start, done — one command. It installs Node 22 if you do not have it,
+registers the WARP accounts, starts the stack and waits until the API answers.
+
 ```bash
-git clone https://github.com/Monarch505/archrouter ~/archrouter \
-  && node ~/archrouter/install.js --unattended
+git clone https://github.com/Monarch505/archrouter ~/archrouter && cd ~/archrouter && bash setup.sh
 ```
+
+Or without cloning by hand:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Monarch505/archrouter/main/setup.sh)
+```
+
+Windows:
 
 ```powershell
 git clone https://github.com/Monarch505/archrouter $env:USERPROFILE\archrouter
 cd $env:USERPROFILE\archrouter
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Works on Debian/Ubuntu/Kali, Fedora/RHEL, Alpine, Arch, Termux, macOS and
+Windows 10+. No Docker, no systemd, no autostart, no root required (it uses
+`sudo`/`nvm` when it needs to).
+
+`setup.sh` prints your API key once and also keeps a copy in
+`~/.archrouter/data/first-key.txt` (mode 600) so a scrolled-away terminal cannot
+lock you out. Useful flags: `--no-warp` (serve direct, skip WARP),
+`--no-opencode`, `--dir PATH`, `--port N`.
+
+Doing it by hand instead:
+
+```bash
+git clone https://github.com/Monarch505/archrouter ~/archrouter
+cd ~/archrouter
 node install.js --unattended
 ```
 
