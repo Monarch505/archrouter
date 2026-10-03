@@ -131,6 +131,28 @@ node "$REPO/archrouter.js" uninstall --yes >/dev/null 2>&1
 is "a foreign install's shim is left alone" "$([ -f "$OTHER_HOME/bin/archrouter" ] && echo present)" "present"
 is "a foreign install's shim is byte-identical" "$(cat "$OTHER_HOME/bin/archrouter")" "$before"
 
+# --- update/rollback must not declare failure on a slow boot -----------------
+# Real report: `archrouter update` reset to the new commit, started everything,
+# then slept 2.5s, saw no /health and told the user to roll back a perfectly
+# good update. Both paths have to poll instead.
+if grep -q 'async function waitHealthy' "$REPO/archrouter.js"; then
+  ok "archrouter.js has a polling health helper"
+else
+  bad "archrouter.js has a polling health helper" "waitHealthy missing"
+fi
+if grep -q 'sleep(2500)' "$REPO/archrouter.js"; then
+  bad "no fixed 2.5s sleep before the health check" "sleep(2500) still present"
+else
+  ok "no fixed 2.5s sleep before the health check"
+fi
+for label in "router after update" "router after rollback"; do
+  if grep -q "waitHealthy(90000, \"$label\")" "$REPO/archrouter.js"; then
+    ok "both restart paths poll ($label)"
+  else
+    bad "both restart paths poll ($label)" "call not found"
+  fi
+done
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

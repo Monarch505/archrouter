@@ -663,6 +663,22 @@ function git(args, opts = {}) {
 }
 const repoHead = () => { const r = git(["rev-parse", "HEAD"]); return r.status === 0 ? r.stdout.trim() : ""; };
 
+// The router needs real time before it answers: warp-a, an 8s stagger, warp-b,
+// the pool, and only then does it bind. A fixed sleep used to report failure on
+// a stack that was starting perfectly well, which is worse than no check at all
+// because it tells the user to roll back a good update.
+async function waitHealthy(timeoutMs = 90000, label = "router") {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const h = await httpGet(`http://${API_HOST}:${API_PORT}/health`, 4000);
+    if (h) return true;
+    if (Date.now() >= deadline) {
+      die(`${label} /health did not answer within ${Math.round(timeoutMs / 1000)}s — see \`${PROG} status\` and \`${PROG} logs router\``);
+    }
+    await sleep(3000);
+  }
+}
+
 async function cmdUpdate(flags) {
   let check = false, noRestart = false, force = false, full = false;
   for (const f of flags) {
@@ -700,9 +716,7 @@ async function cmdUpdate(flags) {
   }
   if (!noRestart) {
     await cmdStart();
-    await sleep(2500);
-    const h = await httpGet(`http://${API_HOST}:${API_PORT}/health`, 4000);
-    if (!h) die(`router /health failed after update — rollback with: ${PROG} rollback`);
+    await waitHealthy(90000, "router after update");
     log(`update done: ${before} → ${after} (prev saved, rollback available)`);
   } else {
     log(`update done (no restart): ${before} → ${after}`);
@@ -731,9 +745,7 @@ async function cmdRollback() {
   await cmdStop(); await sleep(1000);
   if (git(["reset", "--hard", prev]).status !== 0) die("reset failed");
   await cmdStart();
-  await sleep(2500);
-  const h = await httpGet(`http://${API_HOST}:${API_PORT}/health`, 4000);
-  if (!h) die("router /health failed after rollback");
+  await waitHealthy(90000, "router after rollback");
   log(`rollback done: ${cur} → ${prev}`);
 }
 
