@@ -212,23 +212,50 @@ fetch_repo() {
   ok "cloned"
 }
 
-# ----------------------------------------------------------------- PATH ----
+# --------------------------------------------------------------- PATH ----
+# The marker block. Byte-identical wherever it is written — every rc file, and
+# the same text install.js appends — so a re-run can never double-append and
+# uninstall can strip exactly one known chunk from any of them.
+append_path_block() {
+  local rc="$1"
+  [ -f "$rc" ] || touch "$rc" 2>/dev/null || return 1
+  grep -qF "$PATH_MARKER" "$rc" && return 0
+  {
+    echo ""
+    echo "$PATH_MARKER"
+    echo 'case ":$PATH:" in'
+    echo '  *":$HOME/.local/bin:"*) ;;'
+    echo '  *) PATH="$HOME/.local/bin:$PATH" ;;'
+    echo 'esac'
+    echo 'export PATH'
+  } >> "$rc"
+}
+
 persist_path() {
   step "PATH"
-  local changed=0 rc
+  local changed=0 rc had zshrc zwant
   for rc in "$HOME/.bashrc" "$HOME/.profile"; do
-    [ -f "$rc" ] || touch "$rc" 2>/dev/null || continue
-    grep -qF "$PATH_MARKER" "$rc" && continue
-    {
-      echo ""
-      echo "$PATH_MARKER"
-      echo 'case ":$PATH:" in'
-      echo '  *":$HOME/.local/bin:"*) ;;'
-      echo '  *) PATH="$HOME/.local/bin:$PATH" ;;'
-      echo 'esac'
-      echo 'export PATH'
-    } >> "$rc" && changed=1
+    had=0
+    [ -f "$rc" ] && grep -qF "$PATH_MARKER" "$rc" && had=1
+    append_path_block "$rc" || continue
+    [ "$had" = "0" ] && changed=1
   done
+
+  # zsh reads neither .bashrc nor .profile for interactive sessions, and zsh is
+  # the default shell on Kali's root console (Oh-My-Zsh). Without this block in
+  # ~/.zshrc, every NEW terminal ended in "archrouter: command not found" no
+  # matter what the rest of setup did. Only added when the user actually has a
+  # zsh rc file or their login shell is zsh — bash-only users get no new file.
+  zshrc="$HOME/.zshrc"
+  zwant=0
+  case "${SHELL:-}" in *zsh*) zwant=1;; esac
+  [ -f "$zshrc" ] && zwant=1
+  if [ "$zwant" = "1" ]; then
+    had=0
+    [ -f "$zshrc" ] && grep -qF "$PATH_MARKER" "$zshrc" && had=1
+    if append_path_block "$zshrc" && [ "$had" = "0" ]; then changed=1; fi
+  fi
+
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) PATH="$HOME/.local/bin:$PATH"; export PATH; changed=1;;

@@ -213,6 +213,32 @@ else
   bad "the retry budget is overridable" "no env override"
 fi
 
+# --- install.js must persist PATH itself, zsh included ----------------------
+# Its Linux branch used to print `add to PATH: export ...` and nothing else, so
+# `node install.js` runs (the documented manual path) never survived a new
+# terminal — and neither did any zsh session, since only bash rcs were known.
+if grep -q 'function persistPathPosix' "$REPO/install.js"; then
+  ok "install.js writes the PATH block itself"
+else
+  bad "install.js writes the PATH block itself" "persistPathPosix missing"
+fi
+if grep -q '\.zshrc' "$REPO/install.js"; then
+  ok "install.js covers zsh"
+else
+  bad "install.js covers zsh" "no .zshrc reference"
+fi
+# One marker shared with setup.sh is what makes double-append impossible.
+if grep -q 'PATH_MARKER = "# archrouter (added by setup.sh)"' "$REPO/install.js"; then
+  ok "install.js uses the exact marker setup.sh writes"
+else
+  bad "install.js uses the exact marker setup.sh writes" "marker mismatch"
+fi
+if grep -q 'persistPathPosix()' "$REPO/install.js"; then
+  ok "the POSIX shim path actually calls persistPathPosix"
+else
+  bad "the POSIX shim path actually calls persistPathPosix" "never called"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

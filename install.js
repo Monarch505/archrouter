@@ -329,6 +329,33 @@ function shimDir() {
   return path.join(HOME_DIR || os.homedir(), ".local", "bin");
 }
 
+/* ---------------- PATH persistence (POSIX) ----------------
+ * Same marker and same block setup.sh appends, deliberately: one shared chunk
+ * means a re-run (setup.sh calls this file) can never double-append, and
+ * uninstall can strip exactly one known block from any rc file.
+ * ~/.zshrc is included when the user has one or their login shell is zsh —
+ * zsh reads neither .bashrc nor .profile, so without this every new terminal
+ * ended in "archrouter: command not found".
+ */
+const PATH_MARKER = "# archrouter (added by setup.sh)";
+function persistPathPosix() {
+  const home = os.homedir();
+  const files = [".bashrc", ".profile"];
+  const zshrc = path.join(home, ".zshrc");
+  if (fs.existsSync(zshrc) || /zsh/.test(process.env.SHELL || "")) files.push(".zshrc");
+  let wrote = false;
+  for (const f of files) {
+    const p = path.join(home, f);
+    try {
+      const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+      if (cur.includes(PATH_MARKER)) continue;
+      fs.appendFileSync(p, `\n${PATH_MARKER}\ncase ":$PATH:" in\n  *":$HOME/.local/bin:"*) ;;\n  *) PATH="$HOME/.local/bin:$PATH" ;;\nesac\nexport PATH\n`);
+      wrote = true;
+    } catch { /* rc not writable — caller falls back to a printed hint */ }
+  }
+  return wrote;
+}
+
 function installShims() {
   step("launcher on PATH");
   const dir = shimDir();
@@ -370,8 +397,14 @@ function installShims() {
   fs.symlinkSync(path.join(REPO, "archrouter"), target);
   try { fs.chmodSync(path.join(REPO, "archrouter"), 0o755); fs.chmodSync(target, 0o755); } catch { /* best effort */ }
   ok(`symlink → ${target}`);
+  // Persist unconditionally: the marker guard makes it a no-op when setup.sh
+  // already wrote the block, and it covers `node install.js` runs that never
+  // go through setup.sh at all.
+  const persisted = persistPathPosix();
   const inPath = (process.env.PATH || "").split(":").some((p) => { try { return fs.realpathSync(p) === fs.realpathSync(dir); } catch { return p === dir; } });
-  inPath ? ok("shim dir in PATH") : info(`add to PATH: export PATH="$HOME/.local/bin:$PATH"`);
+  if (inPath) ok("shim dir in PATH");
+  else if (persisted) ok("PATH block written to your rc files (bash + zsh) — open a NEW terminal to use it");
+  else info(`add to PATH: export PATH="$HOME/.local/bin:$PATH"`);
 }
 
 /* ---------------- unattended ---------------- */

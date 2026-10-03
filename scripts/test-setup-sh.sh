@@ -107,6 +107,41 @@ case "$HEALTH_TIMEOUT" in
   *) [ "$HEALTH_TIMEOUT" -gt 0 ] && ok "HEALTH_TIMEOUT is a positive integer ($HEALTH_TIMEOUT s)" || bad "HEALTH_TIMEOUT positive" "$HEALTH_TIMEOUT";;
 esac
 
+# --- PATH persistence -------------------------------------------------------
+# Kali's root console is zsh: it reads neither .bashrc nor .profile, so a
+# setup that only patched those left "archrouter: command not found" in every
+# new terminal. persist_path must cover .zshrc for zsh users, be idempotent,
+# and NOT create a .zshrc for bash-only users.
+ZBOX="$TMP/pathhome-zsh"
+mkdir -p "$ZBOX"
+( HOME="$ZBOX" SHELL=/usr/bin/zsh persist_path >/dev/null 2>&1 )
+is "persist_path writes the marker to ~/.bashrc" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$ZBOX/.bashrc" 2>/dev/null)" "1"
+is "persist_path writes the marker to ~/.profile" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$ZBOX/.profile" 2>/dev/null)" "1"
+is "persist_path writes the marker to ~/.zshrc for a zsh user" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$ZBOX/.zshrc" 2>/dev/null)" "1"
+has "the zsh block exports PATH" "$(cat "$ZBOX/.zshrc" 2>/dev/null)" 'export PATH'
+( HOME="$ZBOX" SHELL=/usr/bin/zsh persist_path >/dev/null 2>&1 )
+is "persist_path is idempotent (no duplicate zsh block)" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$ZBOX/.zshrc" 2>/dev/null)" "1"
+
+BBOX="$TMP/pathhome-bash"
+mkdir -p "$BBOX"
+( HOME="$BBOX" SHELL=/bin/bash persist_path >/dev/null 2>&1 )
+if [ -f "$BBOX/.zshrc" ]; then bad "no ~/.zshrc is created for a bash-only user" "file exists"; else ok "no ~/.zshrc is created for a bash-only user"; fi
+is "bash-only user still gets the marker in ~/.bashrc" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$BBOX/.bashrc" 2>/dev/null)" "1"
+
+# An existing ~/.zshrc wins over $SHELL: a bash login with a zsh rc file (or
+# vice versa) must still get the block there.
+EXISTZ="$TMP/pathhome-existing-zshrc"
+mkdir -p "$EXISTZ"
+echo "# user's own zshrc" > "$EXISTZ/.zshrc"
+( HOME="$EXISTZ" SHELL=/bin/bash persist_path >/dev/null 2>&1 )
+is "an existing ~/.zshrc still receives the block" \
+   "$(grep -c 'archrouter (added by setup.sh)' "$EXISTZ/.zshrc" 2>/dev/null)" "1"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
