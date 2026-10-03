@@ -555,6 +555,29 @@ function shimIsOurs(p) {
   }
 }
 
+// The repo is a clone: it comes back with one command, so uninstall removes it
+// — that is the user-level behaviour, a plain purge with no extra flags. The
+// removal runs in a DETACHED child after this process exits, because this very
+// script lives inside the directory being removed, and on Windows a process
+// cannot delete its own working directory.
+function scheduleRepoRemoval() {
+  const script = [
+    'const fs = require("fs"), os = require("os");',
+    "const dir = process.argv[1];",
+    "setTimeout(() => {",
+    "  try { process.chdir(os.homedir()); } catch {}",
+    "  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { process.exit(1); }",
+    "}, 1500);",
+  ].join("\n");
+  try {
+    const c = spawn(process.execPath, ["-e", script, REPO], { detached: true, stdio: "ignore" });
+    c.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function cmdUninstall(flags) {
   let yes = false, purge = false;
   for (const f of flags) {
@@ -632,6 +655,22 @@ async function cmdUninstall(flags) {
     if (fs.existsSync(path.join(BASE, ".env"))) kept.push(`${path.join(BASE, ".env")}`);
   }
 
+  // The repo goes last and it always goes. The one thing worth saying (not
+  // enforcing — this is a user-facing purge, not a review gate) is when the
+  // checkout holds work git has never seen; that note is for whoever
+  // maintains the repo, and it arrives before the deletion actually happens.
+  let dirtyFiles = 0;
+  try {
+    if (fs.existsSync(path.join(REPO, ".git"))) {
+      dirtyFiles = (git(["status", "--porcelain"]).stdout || "").split("\n").filter((l) => l.trim()).length;
+    }
+  } catch { /* no git available — treat the checkout as clean */ }
+
+  if (fs.existsSync(REPO)) {
+    if (scheduleRepoRemoval()) removed.push(`${REPO} (the repo itself — clone again to reinstall)`);
+    else kept.push(`${REPO} (could not schedule its removal — delete it manually)`);
+  }
+
   console.log(`\n  removed ${removed.length}:`);
   for (const r of removed) console.log(`    - ${r}`);
   if (kept.length) {
@@ -640,14 +679,28 @@ async function cmdUninstall(flags) {
   }
 
   console.log("");
+  if (dirtyFiles > 0) {
+    console.log(`  note: the repo had ${dirtyFiles} file(s) with uncommitted changes — they went with it. Commit first next time.`);
+  }
   if (purge) {
     console.log("  WARP accounts are gone — run archrouter warp-setup before starting again.");
     console.log("  API keys are gone — any client holding one (opencode) must be reconnected.");
   } else {
     console.log("  Your API keys still work. To delete those too: archrouter uninstall --purge");
   }
-  console.log("  opencode's config was left alone; if you also remove the repo, run archrouter connect-opencode again.");
-  console.log("  reinstall with: bash <repo>/setup.sh\n");
+  console.log("  opencode's config was left alone; run `archrouter connect-opencode` again after reinstalling.");
+  console.log("  reinstall: git clone https://github.com/Monarch505/archrouter && cd archrouter && bash setup.sh");
+  // The shell that ran this may be sitting inside the directory that is about
+  // to disappear; we cannot cd for it, so say the one command that helps.
+  try {
+    const cwd = process.cwd();
+    const norm = (s) => (process.platform === "win32" ? path.resolve(s).toLowerCase() : path.resolve(s));
+    const c = norm(cwd), r = norm(REPO);
+    if (c === r || c.startsWith(r + path.sep)) {
+      console.log("  your shell is inside the removed directory — run: cd ~");
+    }
+  } catch { /* ignore */ }
+  console.log("");
 }
 
 function ask(question) {

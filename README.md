@@ -77,7 +77,13 @@ archrouter uninstall --yes --purge   # also destroy WARP accounts + API keys
 ```
 
 A plain uninstall stops the stack and removes the launcher, the PATH block it
-added to `~/.bashrc`, the downloaded binaries, the logs and the stale pid files.
+added to your rc files (`.bashrc`, `.profile`, `.zshrc`), the downloaded
+binaries, the logs, the stale pid files — **and the repo clone itself**, so the
+next install starts from a fresh `git clone`. Run it from outside the repo
+directory (`cd ~` first): your shell cannot follow a directory that is gone.
+If the checkout still had uncommitted changes, the summary says so right before
+they go.
+
 It **keeps** your two WARP accounts, `.env` and the API key database, so a
 reinstall keeps working and opencode stays connected — re-registering WARP costs
 new Cloudflare slots, and existing keys would go dead.
@@ -85,8 +91,14 @@ new Cloudflare slots, and existing keys would go dead.
 `--purge` deletes those too. Afterwards you need `archrouter warp-setup` again
 and every client holding a key must be reconnected.
 
-The repo itself is never deleted, and `opencode.json` is never touched. A shim
-that belongs to a different archrouter install is left alone.
+Reinstall with:
+
+```bash
+git clone https://github.com/Monarch505/archrouter && cd archrouter && bash setup.sh
+```
+
+`opencode.json` is never touched, and a shim that belongs to a different
+archrouter install is left alone.
 
 ## Daily use
 

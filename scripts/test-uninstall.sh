@@ -145,6 +145,8 @@ is "PATH block removed from ~/.bashrc" \
    "$(grep -c 'archrouter (added by setup.sh)' "$HOME/.bashrc" || true)" "0"
 hasnt "uninstall tells the user how to reinstall" "$(echo "$out" | tr '\n' '|')" "rm -rf"
 has "uninstall points at the reinstall command" "$out" "setup.sh"
+has "the reinstall hint is a full git clone" "$out" "git clone"
+has "the summary lists the repo itself as removed" "$out" "the repo itself"
 
 # ---------------------------------------------------------------------------
 # Idempotency: running it again on a half-removed tree must not explode.
@@ -163,6 +165,30 @@ if [ -f "$HOMEBASE/warp/warp-a/wgcf-account.toml" ]; then bad "purge removes the
 if [ -f "$HOMEBASE/data/archrouter.db" ]; then bad "purge removes the api key database" "db still there"; else ok "purge removes the api key database"; fi
 has "purge warns that the keys are gone for good" "$out3" "key"
 has "purge explains WARP accounts must be registered again" "$out3" "warp-setup"
+
+# ---------------------------------------------------------------------------
+# Uncommitted work: reported, never blocked. The purge itself is deliberately
+# simple (that is the user-facing contract) — the note below is the developer
+# facing side of the same coin, asserted here so it cannot quietly disappear.
+# ---------------------------------------------------------------------------
+R5=$(fresh_repo)
+printf '\n// work git has never seen\n' >> "$R5/archrouter.js"
+out5=$(node "$R5/archrouter.js" uninstall --yes 2>&1); rc5=$?
+is "uninstall of a dirty repo exits 0 (purge is not gated on cleanliness)" "$rc5" "0"
+has "uncommitted work is reported, not silently swallowed" "$out5" "uncommitted changes"
+
+# ---------------------------------------------------------------------------
+# Every replica above scheduled its own removal from a detached child ~1.5s
+# after the parent printed. One wait covers them all.
+# ---------------------------------------------------------------------------
+sleep 2
+for gone in "$R1" "$R2" "$R3" "$R5"; do
+  if [ -d "$gone" ]; then
+    bad "uninstall removes the repo by default" "still exists: $gone"
+  else
+    ok "uninstall removes the repo by default ($(basename "$gone"))"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Dangling symlinks. existsSync() reports them as missing and realpathSync()
