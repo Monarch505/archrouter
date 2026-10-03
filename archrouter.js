@@ -22,7 +22,7 @@
  * value, contradicting its own comment.
  *
  * Usage: archrouter start|stop|restart|status|logs [name]|update
- *        [--check|--no-restart|--force|--full]|rollback|key [name]|connect-opencode [--variants]|warp-setup [--force]
+ *        [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--variants]|warp-setup [--force]
  *        |warp-reset [a|b]|doctor|version
  */
 
@@ -495,6 +495,144 @@ function httpGetSync(url) {
   }
 }
 
+// Removes what this project put on the machine, and nothing else.
+//
+// The WARP accounts and the API key store are expensive to recreate (Cloudflare
+// registrations are rate-limited, and opencode holds a credential that would go
+// dead), so they survive by default and only go with --purge.
+const PATH_BLOCK_MARKER = "# archrouter (added by setup.sh)";
+
+function stripPathBlock(file) {
+  if (!fs.existsSync(file)) return false;
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  const at = lines.findIndex((l) => l.trim() === PATH_BLOCK_MARKER);
+  if (at === -1) return false;
+  // setup.sh writes the marker, a `case`, then `export PATH`.
+  let end = at;
+  while (end < lines.length && !/^\s*export PATH\s*$/.test(lines[end])) end++;
+  if (end < lines.length) end++;
+  while (end < lines.length && lines[end].trim() === "") end++;
+  lines.splice(at, end - at);
+  fs.writeFileSync(file, lines.join("\n"));
+  return true;
+}
+
+// A shim may be a symlink or a small script; only ever delete one that provably
+// belongs to THIS repo. Matching a bare "archrouter.js" substring is not enough
+// — another install's shim contains it too, and deleting that would break an
+// unrelated working setup.
+function shimIsOurs(p) {
+  try {
+    const link = fs.realpathSync(p);
+    const repoReal = fs.realpathSync(REPO);
+    if (link === repoReal || link.startsWith(repoReal + path.sep)) return true;
+    const target = path.join(REPO, "archrouter.js");
+    const body = fs.readFileSync(p, "utf8");
+    return body.includes(target) || body.includes(target.replace(/\\/g, "/"));
+  } catch {
+    return false;
+  }
+}
+
+async function cmdUninstall(flags) {
+  let yes = false, purge = false;
+  for (const f of flags) {
+    if (f === "--yes" || f === "-y") yes = true;
+    else if (f === "--purge") purge = true;
+    else die(`usage: ${PROG} uninstall [--yes] [--purge]`);
+  }
+
+  const live = pidAlive(readPid("router")) || pidAlive(readPid("pool"));
+  console.log(`\n  archrouter uninstall${purge ? " — PURGE: WARP accounts, API keys and .env go too" : " — WARP accounts, .env and API keys are kept"}`);
+  if (purge) console.log("  your WARP registrations and every API key will be destroyed and cannot be recovered");
+  if (!yes) {
+    if (!process.stdin.isTTY) die("refusing without --yes on a non-interactive shell");
+    const answer = await ask("  continue? [y/N] ");
+    if (!/^y(es)?$/i.test(answer.trim())) { console.log("  aborted — nothing changed"); return; }
+  }
+
+  if (live) {
+    log("stopping the stack ...");
+    await cmdStop();
+    await sleep(800);
+  } else {
+    log("stack not running");
+  }
+
+  const removed = [];
+  const kept = [];
+  const rmFile = (p, label) => {
+    if (!fs.existsSync(p)) return;
+    try { fs.rmSync(p, { force: true }); removed.push(label); }
+    catch (e) { kept.push(`${label} (${e.message})`); }
+  };
+  const rmDir = (d, label) => {
+    if (!fs.existsSync(d)) return;
+    try { fs.rmSync(d, { recursive: true, force: true }); removed.push(label); }
+    catch (e) { kept.push(`${label} (${e.message})`); }
+  };
+
+  for (const d of [path.join(os.homedir(), ".local", "bin"), "/usr/local/bin", "/usr/bin"]) {
+    for (const name of ["archrouter", "archrouter.cmd", "archrouter.ps1"]) {
+      const p = path.join(d, name);
+      if (!fs.existsSync(p)) continue;
+      if (!shimIsOurs(p)) { kept.push(`${p} (not created by archrouter, left alone)`); continue; }
+      rmFile(p, p);
+    }
+  }
+
+  for (const rc of [".bashrc", ".profile", ".zshrc"]) {
+    const f = path.join(os.homedir(), rc);
+    try {
+      if (stripPathBlock(f)) removed.push(`${f} (archrouter PATH block)`);
+    } catch (e) { kept.push(`${f} (${e.message})`); }
+  }
+
+  // Regenerable or disposable.
+  rmDir(path.join(BASE, "bin"), `${path.join(BASE, "bin")} (sing-box, wgcf)`);
+  rmDir(LOGS, LOGS);
+  rmDir(path.join(DATA, "backups"), path.join(DATA, "backups"));
+  for (const n of ["router", "pool", "warp-a", "warp-b"]) rmFile(path.join(DATA, `${n}.pid`), path.join(DATA, `${n}.pid`));
+  rmFile(path.join(DATA, "update.prev"), path.join(DATA, "update.prev"));
+
+  if (purge) {
+    rmDir(WARP, `${WARP} (WARP accounts)`);
+    rmDir(DATA, `${DATA} (API keys, database, logs)`);
+    rmFile(path.join(BASE, ".env"), path.join(BASE, ".env"));
+  } else {
+    if (fs.existsSync(WARP)) kept.push(`${WARP} — WARP accounts (re-registering costs new Cloudflare slots)`);
+    if (fs.existsSync(path.join(DATA, "archrouter.db"))) kept.push(`${path.join(DATA, "archrouter.db")} — API keys stay valid`);
+    if (fs.existsSync(path.join(BASE, ".env"))) kept.push(`${path.join(BASE, ".env")}`);
+  }
+
+  console.log(`\n  removed ${removed.length}:`);
+  for (const r of removed) console.log(`    - ${r}`);
+  if (kept.length) {
+    console.log(`  kept ${kept.length}:`);
+    for (const k of kept) console.log(`    + ${k}`);
+  }
+
+  console.log("");
+  if (purge) {
+    console.log("  WARP accounts are gone — run archrouter warp-setup before starting again.");
+    console.log("  API keys are gone — any client holding one (opencode) must be reconnected.");
+  } else {
+    console.log("  Your API keys still work. To delete those too: archrouter uninstall --purge");
+  }
+  console.log("  opencode's config was left alone; if you also remove the repo, run archrouter connect-opencode again.");
+  console.log("  reinstall with: bash <repo>/setup.sh\n");
+}
+
+function ask(question) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    process.stdout.write(question);
+    stdin.resume();
+    stdin.once("data", (chunk) => { stdin.pause(); resolve(chunk.toString()); });
+    stdin.once("end", () => resolve(""));
+  });
+}
+
 function cmdLogs(name) {
   const target = name || "router";
   const file = path.join(LOGS, `${target}.log`);
@@ -645,7 +783,7 @@ async function cmdWarpReset(idArg) {
 
 /* ---------------- dispatch ---------------- */
 
-const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|key [name]|connect-opencode [--variants]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
+const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--variants]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -662,6 +800,7 @@ async function main() {
     case "logs": cmdLogs(rest[0]); break;
     case "update": await cmdUpdate(rest); break;
     case "rollback": await cmdRollback(); break;
+    case "uninstall": await cmdUninstall(rest); break;
     case "key": cmdKey(rest[0]); break;
     case "connect-opencode": cmdConnectOpencode(rest); break;
     case "warp-setup": cmdWarpSetup(rest); break;

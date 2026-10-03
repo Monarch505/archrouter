@@ -68,6 +68,26 @@ cd ~/archrouter && git fetch origin && git reset --hard origin/main \
   && chmod +x install.sh archrouter && node install.js --unattended
 ```
 
+## Uninstalling
+
+```bash
+archrouter uninstall            # asks first
+archrouter uninstall --yes      # non-interactive
+archrouter uninstall --yes --purge   # also destroy WARP accounts + API keys
+```
+
+A plain uninstall stops the stack and removes the launcher, the PATH block it
+added to `~/.bashrc`, the downloaded binaries, the logs and the stale pid files.
+It **keeps** your two WARP accounts, `.env` and the API key database, so a
+reinstall keeps working and opencode stays connected — re-registering WARP costs
+new Cloudflare slots, and existing keys would go dead.
+
+`--purge` deletes those too. Afterwards you need `archrouter warp-setup` again
+and every client holding a key must be reconnected.
+
+The repo itself is never deleted, and `opencode.json` is never touched. A shim
+that belongs to a different archrouter install is left alone.
+
 ## Daily use
 
 ```bash
@@ -78,6 +98,7 @@ archrouter warp-setup [--force]   # 2 WARP accounts + sing-box configs (idempote
 archrouter warp-reset [a|b]       # bounce one backend (pool coordinator hook)
 archrouter key [name]             # mint another API key
 archrouter connect-opencode [--variants]  # point opencode at this router
+archrouter uninstall [--yes|--purge]  # remove what install put on the machine
 archrouter doctor                 # env / ports / bins / upstream check
 ```
 
