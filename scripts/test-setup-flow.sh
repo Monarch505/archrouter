@@ -12,18 +12,20 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+export HOME="$TMP/home"
+mkdir -p "$HOME"
+
+# Source first: setup.sh defines its own ok/info/warn/step, which would shadow
+# this file's counters if they were defined before it.
+ARCHROUTER_SETUP_LIB=1 . "$REPO/setup.sh"
+
 pass=0; fail=0
-ok()  { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
+ok()  { pass=$((pass+1)); printf '  [ok] %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL %s\n        %s\n' "$1" "${2:-}"; }
 is()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected '$3', got '$2'"; fi; }
 has() { case "$2" in *"$3"*) ok "$1";; *) bad "$1" "'$3' missing from: $2";; esac; }
 
-export HOME="$TMP/home"
-mkdir -p "$HOME"
 REPO_DIR="$TMP/archrouter"
-
-ARCHROUTER_SETUP_LIB=1 . "$REPO/setup.sh"
-REPO_DIR="$TMP/archrouter"   # sourcing reset it; point it at the sandbox
 INSTALL_LOG=""
 
 echo "setup.sh flow tests"
@@ -129,6 +131,28 @@ API_PORT=21988 HEALTH_TIMEOUT=4
 export API_PORT HEALTH_TIMEOUT
 wait_healthy >/dev/null 2>&1
 is "wait_healthy fails (non-zero) when nothing answers" "$?" "1"
+
+# ---------------------------------------------------------------- endings ----
+# A CRLF in a shell script makes Linux fail with "bad interpreter: /bin/bash^M".
+# core.autocrlf=true is common on Windows checkouts, so .gitattributes has to
+# pin LF for every shell script.
+attrs="$REPO/.gitattributes"
+for pat in '*.sh text eol=lf' 'setup.sh text eol=lf'; do
+  if grep -qxF "$pat" "$attrs" 2>/dev/null; then ok ".gitattributes pins '$pat'"
+  else bad ".gitattributes pins '$pat'" "rule missing"; fi
+done
+
+crlf_offenders=""
+for f in setup.sh archrouter install.sh scripts/test-setup-sh.sh scripts/test-setup-flow.sh pool/pool.js; do
+  [ -f "$REPO/$f" ] || continue
+  if LC_ALL=C grep -qU $'\r$' "$REPO/$f" 2>/dev/null; then crlf_offenders="$crlf_offenders $f"; fi
+done
+if [ -z "$crlf_offenders" ]; then ok "no CRLF in the scripts that must run under bash"
+else bad "no CRLF in the scripts that must run under bash" "CRLF found in:$crlf_offenders"; fi
+
+# The committed blobs matter as much as the working tree: that is what a Linux
+# clone gets. Checked in the Node suite — a pipe through MSYS text mode adds
+# CR on its own, which would make this assertion lie in both directions.
 
 echo
 echo "$pass passed, $fail failed"

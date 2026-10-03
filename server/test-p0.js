@@ -419,4 +419,39 @@ ok("opencode minimal write replaces a stale models block instead of leaving it",
   assert.ok(!("models" in onDisk.provider.archrouter));
 });
 
+// A CRLF inside a shell script makes Linux refuse it ("bad interpreter:
+// /bin/bash^M"). core.autocrlf=true is the default on Windows checkouts, so
+// .gitattributes must pin LF and the committed blobs must actually be LF.
+ok("line endings: shell scripts are LF in the tree and in the committed blobs", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const { execFileSync } = require("child_process");
+  const repo = path.join(__dirname, "..");
+  const attrs = fs.readFileSync(path.join(repo, ".gitattributes"), "utf8");
+  for (const rule of ["*.sh text eol=lf", "setup.sh text eol=lf"]) {
+    assert.ok(
+      attrs.split(/\r?\n/).includes(rule),
+      `.gitattributes must contain the exact rule: ${rule}`,
+    );
+  }
+  const files = ["setup.sh", "archrouter", "install.sh", "scripts/test-setup-sh.sh", "scripts/test-setup-flow.sh"];
+  for (const f of files) {
+    const onDisk = fs.readFileSync(path.join(repo, f));
+    assert.ok(!onDisk.includes(Buffer.from("\r\n")), `${f} has CRLF in the working tree`);
+  }
+  // Raw buffer read: piping git through a shell can add CR on its own.
+  let blobs = 0;
+  for (const f of files) {
+    let buf;
+    try {
+      buf = execFileSync("git", ["-C", repo, "cat-file", "blob", `HEAD:${f}`], { maxBuffer: 8 << 20 });
+    } catch {
+      continue; // not committed yet (fresh clone of a dirty tree)
+    }
+    blobs++;
+    assert.ok(!buf.includes(Buffer.from("\r\n")), `committed ${f} has CRLF — Linux would refuse to run it`);
+  }
+  assert.ok(blobs > 0, "no committed shell script could be inspected");
+});
+
 console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);

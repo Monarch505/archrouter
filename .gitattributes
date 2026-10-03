@@ -1,7 +1,11 @@
 # keep shell scripts LF so they run on Linux (Windows checkout would add CRLF)
+*.sh text eol=lf
 install.sh text eol=lf
 archrouter text eol=lf
 scripts/*.sh text eol=lf
+setup.sh text eol=lf
 *.js text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+# PowerShell is happy either way; CRLF matches what Windows tools expect.
+*.ps1 text eol=crlf
