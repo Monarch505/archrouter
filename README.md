@@ -109,7 +109,7 @@ archrouter rollback                                       # restore pre-update v
 archrouter warp-setup [--force]   # 2 WARP accounts + sing-box configs (idempotent; --force burns 2 new slots)
 archrouter warp-reset [a|b]       # bounce one backend (pool coordinator hook)
 archrouter key [name]             # mint another API key
-archrouter connect-opencode [--variants]  # point opencode at this router
+archrouter connect-opencode [--no-models|--no-key]  # point opencode at this router
 archrouter uninstall [--yes|--purge]  # remove what install put on the machine
 archrouter doctor                 # env / ports / bins / upstream check
 ```
@@ -159,6 +159,45 @@ Free models are not all on the same path: `muse-spark-*-contributor-free`
 answers only on `/v1/responses`, `jev-1.13-free` only on `/v1/messages`, the
 rest on `/v1/chat/completions`. `GET /v1/models` reports the correct one per
 model in `capabilities.kind`.
+
+### Pointing opencode at it
+
+```bash
+archrouter connect-opencode
+```
+
+This writes the `archrouter` provider into `~/.config/opencode/opencode.json`
+**with a static `models` block** (ids + effort levels from `modelCaps`), plus
+`options.apiKey` when a key can be resolved — `ARCHROUTER_KEY`, else the key
+printed at install, else the one `/connect` already saved.
+
+The static block is not a shortcut, it is the only shape opencode honours.
+opencode builds its picker from models.dev plus the `models` map in
+`opencode.json`, and it never calls a custom provider's `/v1/models`;
+auto-discovery is hardcoded to Ollama, LM Studio and vLLM at their default
+ports. A provider written with only `npm` + `baseURL` shows up as
+`Provider not found` with an empty list — verified on opencode 1.18.3. General
+discovery is still an open PR (`anomalyco/opencode#42660`), so nothing to wait
+for. `--no-models` exists only to clean up an older install; it writes a
+provider opencode cannot use.
+
+The cost is that a new upstream free model needs another `connect-opencode`
+run. Check it with:
+
+```bash
+opencode models archrouter
+```
+
+The catalog is the full live list, so a few entries will fail when picked —
+recorded rather than hidden:
+
+| model | what happens in opencode |
+| --- | --- |
+| `muse-spark-*-contributor-free`, `jev-1.13-free` | 500 — they only answer on `/v1/responses` and `/v1/messages`, while `@ai-sdk/openai-compatible` posts to `/v1/chat/completions` |
+| `ling-3.0-flash-fin-free` | 400 `Endpoint is unavailable` (upstream, reproducible 3/3) |
+| `ling-3.1-flash-free` | 429 `Endpoint is unavailable` (upstream, reproducible 3/3) |
+
+The other 7 are confirmed working through opencode.
 
 ### API keys
 

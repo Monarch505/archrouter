@@ -22,7 +22,7 @@
  * value, contradicting its own comment.
  *
  * Usage: archrouter start|stop|restart|status|logs [name]|update
- *        [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--variants]|warp-setup [--force]
+ *        [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--no-models|--no-key]|warp-setup [--force]
  *        |warp-reset [a|b]|doctor|version
  */
 
@@ -453,39 +453,94 @@ function cmdKey(nameArg) {
   log(`${store.countActiveApiKeys()} active key(s). The router requires a key on its next start.`);
 }
 
-// Points opencode at this router. Default writes npm + baseURL only, which is
-// enough for opencode to read the catalog from /v1/models itself; --variants
-// additionally writes the static list with per-model effort levels. Needs no
-// running router in the default mode.
+// Points opencode at this router.
+//
+// The catalog opencode shows is built from models.dev plus the STATIC `models`
+// map in opencode.json. opencode never calls a custom provider's /v1/models —
+// auto-discovery is hardcoded to Ollama/LM Studio/vLLM at their default ports —
+// so a provider written without a `models` block shows up as
+// "Provider not found" with an empty list. Writing the static list is therefore
+// the default, not an opt-in extra.
+//
+// The key goes into options.apiKey when one can be resolved, because auth is
+// required by default and that includes the probe below: without it /v1/models
+// answers 401 and this command has nothing to write.
 function cmdConnectOpencode(flags) {
-  let variants = false;
+  let includeModels = true;
+  let writeKey = true;
   for (const f of flags) {
-    if (f === "--variants") variants = true;
-    else die(`usage: ${PROG} connect-opencode [--variants]`);
+    if (f === "--no-models") includeModels = false;
+    else if (f === "--no-key") writeKey = false;
+    else die(`usage: ${PROG} connect-opencode [--no-models] [--no-key]`);
   }
   const oc = require(path.join(REPO, "server", "lib", "opencodeConfig.js"));
-  const modelIds = [];
-  if (variants) {
-    const list = httpGetSync(`http://${API_HOST}:${API_PORT}/v1/models`);
-    const data = list?.data || [];
-    for (const m of data) modelIds.push(m.id);
-    if (!modelIds.length) die(`router not answering on :${API_PORT} — start it first, or drop --variants`);
+  const { key: apiKey, from: keyFrom } = resolveClientKey(oc);
+  // The probe needs the same credential opencode will use, otherwise the
+  // catalog comes back empty on any install with auth on.
+  const list = apiKey ? httpGetSync(`http://${API_HOST}:${API_PORT}/v1/models`, apiKey) : null;
+  const data = list?.data || [];
+  if (includeModels) {
+    if (!data.length) {
+      const authed = apiKey ? " with the resolved key" : " (no key resolved — see below)";
+      die(`router not answering on :${API_PORT}${authed}. Start it, fix the key, or pass --no-key.`);
+    }
   }
-  const fragment = oc.buildFragment({ host: API_HOST, port: API_PORT, modelIds, includeModels: variants });
+  const modelIds = data.map((m) => m.id);
+  const fragment = oc.buildFragment({
+    host: API_HOST,
+    port: API_PORT,
+    modelIds,
+    includeModels,
+    apiKey: writeKey ? apiKey : "",
+  });
   const result = oc.writeConfig(fragment);
   if (!result.ok) die(result.error);
   log(`opencode provider written to ${result.file} (${result.mode})`);
   if (result.backup) log(`backup: ${result.backup}`);
-  if (variants) log(`${result.models} models with effort levels.`);
-  else log("opencode now reads the model list from /v1/models, so new free models appear on their own.");
-  log("in opencode: /connect -> Other -> archrouter -> paste your key (see `archrouter key`).");
+  if (includeModels) {
+    log(`${result.models} models in the catalog, with effort levels where the model accepts them.`);
+    log("static list: a new upstream free model needs another `connect-opencode` run.");
+  } else {
+    log("no models block written — opencode will NOT discover them from /v1/models.");
+    log("the picker will stay empty for this provider. Re-run without --no-models.");
+  }
+  if (writeKey && apiKey) log(`apiKey written into options, taken from ${keyFrom}.`);
+  else if (writeKey) log("no apiKey found — set one with `/connect -> Other -> archrouter` or re-run after `archrouter key`.");
 }
 
-function httpGetSync(url) {
+// The credential opencode should use against this router, most explicit source
+// first: ARCHROUTER_KEY, then the key printed at install, then whatever
+// /connect already saved for this provider id. Returns { key: "", from: "" } when
+// nothing is available — the caller reports that instead of guessing.
+function resolveClientKey(oc) {
+  const env = (process.env.ARCHROUTER_KEY || "").trim();
+  if (env) return { key: env, from: "ARCHROUTER_KEY" };
+  const firstKeyFile = path.join(DATA, "first-key.txt");
+  try {
+    if (fs.existsSync(firstKeyFile)) {
+      const k = fs.readFileSync(firstKeyFile, "utf8").trim();
+      if (k) return { key: k, from: firstKeyFile };
+    }
+  } catch { /* unreadable — try the next source */ }
+  const authFile = typeof oc?.authPath === "function" ? oc.authPath() : null;
+  if (authFile) {
+    try {
+      if (fs.existsSync(authFile)) {
+        const stored = JSON.parse(fs.readFileSync(authFile, "utf8"));
+        const k = stored?.[oc.PROVIDER_ID]?.key;
+        if (typeof k === "string" && k.trim()) return { key: k.trim(), from: authFile };
+      }
+    } catch { /* malformed store — not fatal, just no key */ }
+  }
+  return { key: "", from: "" };
+}
+
+function httpGetSync(url, apiKey = "") {
+  const init = apiKey ? `{ headers: { Authorization: "Bearer " + ${JSON.stringify(apiKey)} } }` : "";
   try {
     const r = spawnSync(process.execPath, ["-e", `
       const u = ${JSON.stringify(url)};
-      fetch(u).then(r => r.json()).then(j => { process.stdout.write(JSON.stringify(j)); })
+      fetch(u, ${init}).then(r => r.json()).then(j => { process.stdout.write(JSON.stringify(j)); })
         .catch(() => process.exit(1));
     `], { encoding: "utf8", timeout: 20000 });
     if (r.status !== 0) return null;
@@ -875,7 +930,7 @@ async function cmdWarpReset(idArg) {
 
 /* ---------------- dispatch ---------------- */
 
-const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--variants]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
+const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--no-models|--no-key]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
 
 async function main() {
   const argv = process.argv.slice(2);

@@ -373,17 +373,21 @@ ok("caps: curated table + free/paid alias", () => {
   assert.strictEqual(variantsFor("oc/jev-1.13-free"), null, "no reasoning → no variants");
   assert.strictEqual(variantsFor("oc/muse-spark-1.3-contributor-free").high.reasoningEffort, "high");
 });
-ok("opencode fragment: skips unavailable, variants per model, openai-compatible npm", () => {
+ok("opencode fragment: skips only unavailable, variants per model, openai-compatible npm", () => {
   const frag = opencodeConfig.buildFragment({
     host: "127.0.0.1", port: 20399,
-    modelIds: ["oc/mimo-v2.5-free", "oc/jev-1.13-free", "oc/deepseek-v4-flash-free"],
+    modelIds: ["oc/mimo-v2.5-free", "oc/jev-1.13-free", "oc/deepseek-v4-flash-free", "oc/muse-spark-1.3-contributor-free"],
   });
   const p = frag.provider.archrouter;
   assert.strictEqual(p.npm, "@ai-sdk/openai-compatible");
   assert.strictEqual(p.options.baseURL, "http://127.0.0.1:20399/v1");
-  assert.deepStrictEqual(Object.keys(p.models), ["mimo-v2.5-free", "jev-1.13-free"]);
+  // deepseek is the only drop: upstream-unavailable. jev (systemone) and
+  // muse-spark (responses) cannot be reached via /v1/chat/completions but stay
+  // listed on purpose — recorded in opencodeConfig.js, not hidden.
+  assert.deepStrictEqual(Object.keys(p.models), ["mimo-v2.5-free", "jev-1.13-free", "muse-spark-1.3-contributor-free"]);
   assert.deepStrictEqual(Object.keys(p.models["mimo-v2.5-free"].variants), ["low", "medium", "high"]);
   assert.strictEqual(p.models["jev-1.13-free"].variants, undefined);
+  assert.deepStrictEqual(Object.keys(p.models["muse-spark-1.3-contributor-free"].variants), ["high"]);
 });
 ok("opencode merge: keeps other providers, agents and the top-level model", () => {
   const frag = opencodeConfig.buildFragment({ modelIds: ["oc/mimo-v2.5-free"] });
@@ -399,13 +403,32 @@ ok("opencode merge: keeps other providers, agents and the top-level model", () =
   assert.strictEqual(merged.agent.explorer.model, "OcRouter/Big-P");
   assert.ok(merged.provider.archrouter.models["mimo-v2.5-free"]);
 });
-ok("opencode minimal entry: no models block, so opencode reads /v1/models itself", () => {
+// Regression guard for a wrong premise that shipped in this file: the old
+// comment here claimed opencode reads the catalog from a custom provider's
+// /v1/models on its own. It does not. Verified on opencode 1.18.3 — the catalog
+// is models.dev plus the static `models` map, auto-discovery is hardcoded to
+// Ollama/LM Studio/vLLM, and a provider without a models block reports
+// "Provider not found". So the static list is the default shape.
+ok("opencode minimal entry drops the models block on purpose and is NOT a usable config", () => {
   const frag = opencodeConfig.buildFragment({ includeModels: false });
   const p = frag.provider.archrouter;
   assert.strictEqual(p.npm, "@ai-sdk/openai-compatible");
   assert.strictEqual(p.options.baseURL, "http://127.0.0.1:20399/v1");
   assert.strictEqual(p.models, undefined);
   assert.ok(!("models" in JSON.parse(JSON.stringify(p))), "no models key may reach the file");
+});
+ok("opencode entry defaults to a models block (opencode does not auto-discover /v1/models)", () => {
+  // The default path must still be the static one; only --no-models opts out.
+  assert.ok(typeof opencodeConfig.buildFragment({}).provider.archrouter.models === "object");
+  assert.ok(opencodeConfig.buildFragment({ includeModels: false }).provider.archrouter.models === undefined);
+  const real = opencodeConfig.buildFragment({ modelIds: ["space-bunny-free"] });
+  assert.ok(real.provider.archrouter.models["space-bunny-free"], "a listed id must reach the catalog");
+  assert.strictEqual(opencodeConfig.buildProvider().archrouter.name, "archrouter", "display name is written");
+});
+ok("opencode entry carries the apiKey so an auth-required router answers /v1/models", () => {
+  const p = opencodeConfig.buildProvider({ apiKey: "sk-arch-test" }).archrouter;
+  assert.strictEqual(p.options.apiKey, "sk-arch-test");
+  assert.ok(!("apiKey" in opencodeConfig.buildProvider({}).archrouter.options), "no empty apiKey written");
 });
 ok("opencode minimal write replaces a stale models block instead of leaving it", () => {
   const minimal = opencodeConfig.buildFragment({ includeModels: false });

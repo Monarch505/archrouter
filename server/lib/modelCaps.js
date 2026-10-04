@@ -22,6 +22,9 @@ const CAPS = {
   "mimo-v2.5-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
   "mimo-v2.6-flash-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
   "space-bunny-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
+  // Upstream keeps listing it but the chat path is dead: 3/3 attempts on
+  // 2026-10-04 gave 400 "Endpoint is unavailable". Stays "chat" on purpose so it
+  // is not silently hidden — see the ling note below.
   "ling-3.0-flash-fin-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
   "nemotron-3.5-lightning-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
   "nemotron-3-ultra-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
@@ -38,6 +41,15 @@ const CAPS = {
 
   // Upstream answered 400 "Model is unavailable" on 2026-09-30.
   "deepseek-v4-flash-free": { kind: "unavailable", reasoning: false, efforts: [] },
+
+  // Left as chat on purpose — NOT to be unlisted. Measured 2026-10-04, three
+  // identical attempts each through /v1/chat/completions:
+  //   ling-3.0-flash-fin-free -> 400 "Upstream request failed: Endpoint is unavailable"
+  //   ling-3.1-flash-free     -> 429, same message
+  // Reproducible, so it is upstream, not archrouter. They stay in the catalog so
+  // the failure is visible where it happens; flip them to "unavailable" only if
+  // upstream stops listing them or you would rather the picker not offer them.
+  "ling-3.1-flash-free": { kind: "chat", reasoning: true, efforts: ["low", "medium", "high"] },
 };
 
 // Unknown model: assume the chat path with reasoning and the two levels that
