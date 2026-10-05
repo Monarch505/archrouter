@@ -80,7 +80,7 @@ async function handleChatCompletions(router, req, res) {
   const isStream = body.stream === true;
   try {
     const out = await router.forward({ body, isMessagesEndpoint: false });
-    const meta = { id: logId, model: body.model, proxy: out.proxy, attempts: 1, rotated: !!out.rotated, latencyMs: out.latencyMs };
+    const meta = { id: logId, model: body.model, proxy: out.proxy, attempts: 1, rotated: !!out.rotated, latencyMs: out.latencyMs, session: out.session || null, egress: out.egress || null };
 
     if (isStream && out.stream) {
       res.writeHead(out.status, {

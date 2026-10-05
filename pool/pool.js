@@ -87,7 +87,15 @@ function splitHostPort(s, defPort) {
   return { host: m[1] || m[2], port: Number(m[3] || defPort) };
 }
 
-function log(...a) { console.log(`[pool ${new Date().toISOString()}]`, ...a); }
+function log(...a) { console.log(`[pool ${localTs()}]`, ...a); }
+
+// Device-local time: an ISO stamp here is UTC, and every log line then
+// disagrees with the operator's clock (same bug as server/lib/logger.js).
+function localTs() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
 
 // Never die silently: log crashes before exit (helps launcher debugging).
 process.on("uncaughtException", (e) => { log(`FATAL uncaught: ${e.stack || e.message}`); process.exit(1); });
@@ -587,6 +595,7 @@ const api = http.createServer((req, res) => {
   if (u.pathname === "/" && req.method === "GET") {
     return sendJson(res, 200, {
       instances: backends.map((b) => ({ id: b.id, running: Date.now() - b.lastOk < 2 * HEALTH_INTERVAL, public_ip: b.lastIp, consecFails: b.consecFails, quarantined: isQuarantined(b), parked: b.parked, lastReset: b.lastReset ? new Date(b.lastReset).toISOString() : null })),
+      last_serve: { ...lastServe },
       ip_conflict: hasIpConflict(),
       parked: backends.filter((b) => b.parked).map((b) => b.id),
       same_ip_guard: SAME_IP_GUARD,

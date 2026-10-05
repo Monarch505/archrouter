@@ -35,7 +35,7 @@ async function handleResponses(router, req, res) {
   const isStream = body.stream === true;
   try {
     const out = await router.forward({ body, kind: "responses" });
-    const meta = { id: logId, model: body.model, proxy: out.proxy, attempts: 1, rotated: !!out.rotated, latencyMs: out.latencyMs, kind: "responses" };
+    const meta = { id: logId, model: body.model, proxy: out.proxy, attempts: 1, rotated: !!out.rotated, latencyMs: out.latencyMs, kind: "responses", session: out.session || null, egress: out.egress || null };
 
     if (isStream && out.stream) {
       res.writeHead(out.status, {

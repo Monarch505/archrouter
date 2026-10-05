@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux — syntax + suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: node --check archrouter.js install.js server/server.js pool/pool.js server/lib/store.js
+      - name: Offline suites (test-p0, auth-store, pool rotation)
+        run: |
+          node server/test-p0.js
+          node server/test-auth-store.js
+          node scripts/test-pool-rotation.js
+      - name: Installer suites (setup.sh, flow, uninstall)
+        run: |
+          bash scripts/test-setup-sh.sh
+          bash scripts/test-setup-flow.sh
+          bash scripts/test-uninstall.sh
+
+  windows:
+    name: Windows — PowerShell installer suite
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: PowerShell setup suite
+        run: pwsh -NoProfile -File scripts/test-setup-ps1.ps1

@@ -18,10 +18,14 @@ command installers · state lives in `~/.archrouter` (env `ARCHROUTER_HOME`).
 - Suites (all must be green, report the counts in the commit message):
   - `node server/test-p0.js`
   - `node server/test-auth-store.js`
+  - `node scripts/test-pool-rotation.js`
   - `bash scripts/test-setup-sh.sh`
   - `bash scripts/test-setup-flow.sh`
   - `bash scripts/test-uninstall.sh` (on Windows use `C:\Program Files\Git\bin\bash.exe`)
   - `pwsh -NoProfile -File scripts\test-setup-ps1.ps1`
+- CI (`.github/workflows/ci.yml`) runs syntax + the same suites on every
+  push/PR (Linux job) — its Windows job is where the pwsh suite runs when the
+  local machine has no pwsh.
 - Shell scripts stay LF in the working tree **and** in the git blob
   (`.gitattributes` pins `*.sh text eol=lf`). CRLF on Linux = `bad interpreter`.
 

@@ -6,7 +6,8 @@
  * apply aliases), builds exact opencode headers, optionally routes through a
  * proxy, forwards to opencode.ai, and relays the response back.
  *
- * On 429/403 with a limit marker: rotates identity (+ proxy) and retries,
+ * On 429 (always — the status itself is the limit signal) or 403 with a limit
+ * marker: rotates identity (+ egress IP) and retries,
  * mirroring 9router's bc(a+1) loop with a retry cap. Each attempt is logged.
  */
 
@@ -62,6 +63,37 @@ class Router {
     } catch (e) {
       logger.warn(`[router] pool report setup failed: ${e.message}`);
       return Promise.resolve(false);
+    }
+  }
+
+  /**
+   * Best-effort public egress IP for a proxy, for the Request Log.
+   * warp: reads the pool status (last_serve → instance.public_ip) with an
+   * 800ms timeout and a 3s failure circuit so a dead status API never slows
+   * the request path down. Other modes: the proxy host itself. Never throws.
+   */
+  async egressIp(proxy) {
+    try {
+      if (this.proxyRouter.mode !== "warp") {
+        if (!proxy) return null;
+        return proxy.replace(/^[a-z0-9+.-]+:\/\//i, "").split("@").pop().replace(/\/.*$/, "") || null;
+      }
+      const now = Date.now();
+      if (this._egressFailUntil && now < this._egressFailUntil) return this._egressCache || null;
+      const statusUrl = (this.config.proxy?.warp?.statusUrl || "http://127.0.0.1:9190").replace(/\/$/, "");
+      const resp = await transport.doRequest({ target: transport.parseUrl(statusUrl), method: "GET", headers: {}, timeoutMs: 800 });
+      const s = JSON.parse(await resp.text());
+      let host = "opencode.ai";
+      try { host = new URL(this.config.baseUrl || "https://opencode.ai").hostname; } catch {}
+      const id = s.last_serve && s.last_serve[host];
+      const inst = (s.instances || []).find((i) => i.id === id);
+      const ip = (inst && inst.public_ip) || null;
+      this._egressCache = ip;
+      this._egressFailUntil = 0;
+      return ip;
+    } catch (e) {
+      this._egressFailUntil = Date.now() + 3000;
+      return this._egressCache || null;
     }
   }
 
@@ -285,7 +317,7 @@ class Router {
       const waitMs = this.provider.cooldownRemainingMs();
       if (waitMs > 0) {
         logger.warn(`[attempt ${attempt}] 403-cooldown active, waiting ${Math.ceil(waitMs / 1000)}s`);
-        this.logs.push({ type: "cooldown", status: 403, model: body.model, proxy: null, rotated: false, attempt, message: `cooldown ${waitMs}ms` });
+        this.logs.push({ type: "cooldown", status: 403, model: body.model, proxy: null, rotated: false, attempt, message: `cooldown ${waitMs}ms`, session: this.provider.ocSession, egress: null });
         await new Promise((r) => setTimeout(r, Math.min(waitMs, 90000)));
       }
 
@@ -300,6 +332,8 @@ class Router {
         : this.provider.buildUrl(false);
       const proxyLabel = proxy ? proxy.replace(/^https?:\/\//, "") : "direct";
       const pathLabel = isResponses ? "/zen/v1/responses" : isMessagesEndpoint ? "/zen/v1/messages" : "/zen/v1/chat/completions";
+      const attemptSession = headers["x-opencode-session"] || this.provider.ocSession;
+      let attemptEgress = null;
 
       logger.info(
         `[attempt ${attempt}/${retries}] POST ${pathLabel}` +
@@ -316,6 +350,7 @@ class Router {
           proxyStyle,
           timeoutMs: timeoutMs ?? this.config.requestTimeoutMs ?? 120000,
         });
+        attemptEgress = await this.egressIp(proxy);
 
         if (resp.status >= 200 && resp.status < 300) {
           if (finalBody.stream === true && !collapse) {
@@ -326,6 +361,8 @@ class Router {
               provider: this.provider,
               proxy,
               latencyMs: Date.now() - t0,
+              session: attemptSession,
+              egress: attemptEgress,
             };
           }
           if (collapse) {
@@ -334,7 +371,7 @@ class Router {
               const json = isResponses
                 ? await Router.collapseResponsesSSE(resp.stream())
                 : await Router.collapseSSE(resp.stream(), body.model);
-              return { status: 200, raw: JSON.stringify(json), json, provider: this.provider, proxy, latencyMs: Date.now() - t0, collapsed: true };
+              return { status: 200, raw: JSON.stringify(json), json, provider: this.provider, proxy, latencyMs: Date.now() - t0, collapsed: true, session: attemptSession, egress: attemptEgress };
             } catch (e) {
               lastError = { status: 502, message: `collapse failed: ${e.message}` };
               logger.error(`[attempt ${attempt}] collapse failed: ${e.message}`);
@@ -356,9 +393,9 @@ class Router {
             logger.warn(`[attempt ${attempt}] 2xx non-JSON challenge, rotated identity -> ${this.provider.ocSession}`);
             this.provider.rotateIdentity();
             if (proxy) this.proxyRouter.reportFailure(proxy);
-            this.logs.push({ type: "rotation", status: resp.status, model: body.model, proxy: proxy || null, rotated: true, attempt, message: "2xx non-JSON (challenge)" });
+            this.logs.push({ type: "rotation", status: resp.status, model: body.model, proxy: proxy || null, rotated: true, attempt, message: "2xx non-JSON (challenge)", session: attemptSession, egress: attemptEgress });
             if (attempt < retries) continue;
-            return { status: 429, raw, json: { error: { message: "upstream returned a challenge page; try again", type: "rate_limit_error", code: "rate_limit_exceeded" } }, provider: this.provider, proxy, latencyMs: Date.now() - t0, rotated: true };
+            return { status: 429, raw, json: { error: { message: "upstream returned a challenge page; try again", type: "rate_limit_error", code: "rate_limit_exceeded" } }, provider: this.provider, proxy, latencyMs: Date.now() - t0, rotated: true, session: attemptSession, egress: attemptEgress };
           }
           return {
             status: resp.status,
@@ -367,6 +404,8 @@ class Router {
             provider: this.provider,
             proxy,
             latencyMs: Date.now() - t0,
+            session: attemptSession,
+            egress: attemptEgress,
           };
         }
 
@@ -431,6 +470,8 @@ class Router {
             rotated: true,
             attempt,
             message: lastError.message.slice(0, 200),
+            session: attemptSession,
+            egress: attemptEgress,
           });
           if (attempt < retries) continue;
           return {
@@ -447,6 +488,8 @@ class Router {
             proxy,
             latencyMs: Date.now() - t0,
             rotated: true,
+            session: attemptSession,
+            egress: attemptEgress,
           };
         }
 
@@ -467,6 +510,8 @@ class Router {
             rotated: false,
             attempt,
             message: (errBody || "").slice(0, 200) || `upstream ${resp.status}`,
+            session: attemptSession,
+            egress: attemptEgress,
           });
           if (attempt < retries) continue;
           return {
@@ -477,6 +522,8 @@ class Router {
             proxy,
             latencyMs: Date.now() - t0,
             rotated: false,
+            session: attemptSession,
+            egress: attemptEgress,
           };
         }
 
@@ -488,6 +535,8 @@ class Router {
           provider: this.provider,
           proxy,
           latencyMs: Date.now() - t0,
+          session: attemptSession,
+          egress: attemptEgress,
         };
       } catch (err) {
         logger.error(`[attempt ${attempt}] request failed: ${err.message}`);

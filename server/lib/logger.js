@@ -20,7 +20,11 @@ const colors = {
 };
 
 function ts() {
-  return new Date().toISOString().replace("T", " ").replace("Z", "");
+  // Device-local time (the old ISO+strip trick printed UTC while the header
+  // promised local — every log line sat 7h off in WIB).
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
 }
 
 function write(level, color, args) {

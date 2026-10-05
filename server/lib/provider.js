@@ -91,7 +91,7 @@ class OpenCodeProvider {
       if (parsed.error?.message) msg = parsed.error.message;
       else if (parsed.error?.error?.message) msg = parsed.error.error.message;
     } catch {}
-    if ((s === 429 || s === 403) && LIMIT_RE.test(d)) {
+    if (s === 429 || (s === 403 && LIMIT_RE.test(d))) {
       this.forbiddenStreak = 0; // limit-hit resets the 403 streak; identity rotates instead
       this.rotateIdentity();
       return { status: s, message: msg, poolScoped: { reason: "ip-limit" } };

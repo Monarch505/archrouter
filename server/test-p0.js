@@ -42,6 +42,29 @@ ok("parseError 429+limit rotates identity", () => {
   assert.ok(r && r.poolScoped.reason === "ip-limit");
   assert.notStrictEqual(p.ocSession, before);
 });
+ok("parseError 429 WITHOUT any limit marker still rotates (status alone is the signal)", () => {
+  const p = new OpenCodeProvider({});
+  const before = p.ocSession;
+  const r = p.parseError(429, JSON.stringify({ error: { message: "Upstream request failed: Endpoint is unavailable" } }));
+  assert.ok(r, "429 must never fall through to the pass-through path");
+  assert.strictEqual(r.poolScoped.reason, "ip-limit");
+  assert.notStrictEqual(p.ocSession, before);
+});
+ok("parseError 429 with an empty body still rotates", () => {
+  const p = new OpenCodeProvider({});
+  const before = p.ocSession;
+  const r = p.parseError(429, "");
+  assert.ok(r && r.poolScoped.reason === "ip-limit");
+  assert.notStrictEqual(p.ocSession, before);
+});
+ok("requestLog keeps session + egress so the log can be analysed", () => {
+  const { RequestLog } = require("./lib/requestLog.js");
+  const rl = new RequestLog();
+  const e = rl.push({ status: 429, rotated: true, session: "ses_test", egress: "203.0.113.7" });
+  assert.strictEqual(e.session, "ses_test");
+  assert.strictEqual(e.egress, "203.0.113.7");
+  assert.strictEqual(rl.recent(1)[0].session, "ses_test");
+});
 ok("parseError 403-no-limit #1: egress-refresh only, identity kept", () => {
   const p = new OpenCodeProvider({});
   const before = p.ocSession;
@@ -477,4 +500,86 @@ ok("line endings: shell scripts are LF in the tree and in the committed blobs", 
   assert.ok(blobs > 0, "no committed shell script could be inspected");
 });
 
-console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);
+async function okAsync(name, fn) {
+  try { await fn(); pass += 1; console.log(`ok - ${name}`); }
+  catch (e) { console.error(`FAIL - ${name}: ${e.message}`); process.exitCode = 1; }
+}
+
+// End-to-end 429 rotation, hermetic: fake pool on 127.0.0.1:0, upstream
+// stubbed — no real network, no real WARP (AGENTS rule 5).
+(async () => {
+  const http = require("http");
+  const transport = require("./lib/transport.js");
+  const realDoRequest = transport.doRequest;
+  const reports = [];
+  const seq = [];
+  const sessions = [];
+  let pool = null;
+  try {
+    pool = http.createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({
+          instances: [{ id: "a", public_ip: "203.0.113.7" }, { id: "b", public_ip: "203.0.113.8" }],
+          last_serve: { "opencode.ai": "a" },
+        }));
+      }
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        seq.push("report");
+        try { reports.push(JSON.parse(raw || "{}")); } catch { reports.push({}); }
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise((resolve) => pool.listen(0, "127.0.0.1", resolve));
+    const statusUrl = `http://127.0.0.1:${pool.address().port}`;
+
+    transport.doRequest = async (opts) => {
+      if (opts.target.hostname === "127.0.0.1") return realDoRequest(opts);
+      sessions.push(opts.headers["x-opencode-session"]);
+      seq.push("req");
+      return { status: 429, headers: {}, text: async () => JSON.stringify({ error: { message: "Upstream request failed: Endpoint is unavailable" } }) };
+    };
+
+    const proxyRouter = {
+      mode: "warp",
+      nextProxy: () => "socks5h://127.0.0.1:11801",
+      reportLimit: () => {},
+      reportFailure: () => {},
+      reportBadProxy: () => {},
+    };
+    const config = { retries: 3, baseUrl: "https://opencode.ai", proxy: { warp: { statusUrl } } };
+    const r = new Router({ config, proxyRouter, modelCache: null });
+
+    await okAsync("429 rotation is one package: fresh session per attempt + report before next attempt + egress IP in the log", async () => {
+      const out = await r.forward({ body: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }], stream: true } });
+      assert.strictEqual(out.status, 429, `expected the capped 429, got ${out.status}`);
+      assert.strictEqual(sessions.length, 3, `expected 3 upstream attempts, got ${sessions.length}`);
+      assert.strictEqual(new Set(sessions).size, 3, `every attempt must carry a fresh session: ${sessions.join(",")}`);
+      assert.strictEqual(reports.length, 3, `every 429 must be reported to the pool, got ${reports.length}`);
+      assert.ok(reports.every((x) => x.event === "freeusagelimit"), JSON.stringify(reports));
+      assert.deepStrictEqual(seq, ["req", "report", "req", "report", "req", "report"], "the pool report must be awaited before the next attempt (IP a→b, then session+1)");
+      const rotations = r.logs.entries.filter((e) => e.type === "rotation");
+      assert.strictEqual(rotations.length, 3, `expected 3 rotation entries, got ${rotations.length}`);
+      for (const [i, e] of rotations.entries()) {
+        assert.strictEqual(e.session, sessions[i], `rotation entry ${i} must name the session that got the 429`);
+        assert.strictEqual(e.egress, "203.0.113.7", `rotation entry ${i} must name the burned egress IP`);
+      }
+      assert.strictEqual(out.session, sessions[2], "final response must carry the session actually used");
+      assert.strictEqual(out.egress, "203.0.113.7", "final response must carry the egress IP");
+    });
+  } catch (e) {
+    console.error(`FAIL - async setup: ${e.message}`);
+    process.exitCode = 1;
+  } finally {
+    transport.doRequest = realDoRequest;
+    if (pool) {
+      if (pool.closeAllConnections) pool.closeAllConnections();
+      await new Promise((resolve) => pool.close(resolve));
+    }
+  }
+
+  console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);
+})();

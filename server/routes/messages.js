@@ -34,7 +34,7 @@ async function handleMessages(router, req, res) {
 
   try {
     const out = await router.forward({ body: oai, isMessagesEndpoint: false });
-    const meta = { id: logId, model: oai.model, proxy: out.proxy, rotated: !!out.rotated, latencyMs: out.latencyMs, kind: "anthropic" };
+    const meta = { id: logId, model: oai.model, proxy: out.proxy, rotated: !!out.rotated, latencyMs: out.latencyMs, kind: "anthropic", session: out.session || null, egress: out.egress || null };
 
     if (isStream && out.stream) {
       res.writeHead(out.status, {

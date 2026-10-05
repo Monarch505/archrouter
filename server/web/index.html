@@ -551,8 +551,10 @@ async function refreshLogs() {
 function renderLogs() {
   $("logs").innerHTML = logs.map((l) => {
     const badge = l.status >= 200 && l.status < 400 ? '<span class="ok">ok</span>' : l.rotated ? '<span class="rot">rot</span>' : '<span class="err">err</span>';
-    const ts = (l.ts || "").replace("T", " ").replace("Z", "").slice(11, 19);
-    return `<div class="line"><span class="s">${ts}</span> [${badge}] ${l.type || l.kind || "chat"} ${l.model || ""} ${l.status ?? ""} ${l.proxy ? "via " + l.proxy : ""} ${l.chunks ? l.chunks + "ch" : ""} ${l.finish ? "fin=" + l.finish : ""} ${l.error ? '<span class="err">' + l.error + "</span>" : ""}</div>`;
+    const ts = l.ts ? new Date(l.ts).toLocaleTimeString([], { hour12: false }) : "";
+    const ses = l.session ? ` ses=${l.session}` : "";
+    const ip = l.egress ? ` ip=${l.egress}` : "";
+    return `<div class="line"><span class="s">${ts}</span> [${badge}] ${l.type || l.kind || "chat"} ${l.model || ""} ${l.status ?? ""} ${l.proxy ? "via " + l.proxy : ""}${ses}${ip} ${l.chunks ? l.chunks + "ch" : ""} ${l.finish ? "fin=" + l.finish : ""} ${l.error ? '<span class="err">' + l.error + "</span>" : ""}</div>`;
   }).join("") || '<div class="sub">no requests yet</div>';
 }
 
