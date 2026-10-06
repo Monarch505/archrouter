@@ -45,7 +45,12 @@ const id = process.argv[3];
 fs.appendFileSync(process.argv[2], id + "\\n");
 const m = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
 m[id] = id === "a" ? process.argv[5] : process.argv[6];   // bounce -> new egress IP
-fs.writeFileSync(process.argv[4], JSON.stringify(m));
+// Atomic replace: the fake backend parses this file FROM ANOTHER PROCESS on
+// every health probe. writeFileSync truncates first, a read in that window
+// sees "" — the suite crashed with SyntaxError mid-CI on exactly that race.
+const tmp = process.argv[4] + "." + process.pid + ".tmp";
+fs.writeFileSync(tmp, JSON.stringify(m));
+fs.renameSync(tmp, process.argv[4]);
 `);
 
 function fakeBackend(port, tag) {
@@ -156,6 +161,36 @@ function check(name, cond, extra = "") {
   await new Promise((res) => healthSrv.listen(HEALTH, "127.0.0.1", res));
   const srvA = await fakeBackend(FAKE_A, "a");
   const srvB = await fakeBackend(FAKE_B, "b");
+
+  // Rule 16: the hook's ipMap update must be atomic across processes — the
+  // fake backend parses the file while the hook rewrites it. Hammer-read a
+  // SEPARATE file while the REAL hook.js rewrites it (argv[4] is the path,
+  // so the algorithm under test is the shipped one, but ipMap — which the
+  // rest of this suite depends on — stays pristine): a plain writeFileSync
+  // truncates first and the reader parses "" (the CI crash this guards),
+  // rename cannot tear.
+  {
+    const raceFile = path.join(tmp, "race.json");
+    fs.writeFileSync(raceFile, JSON.stringify(IP_START));
+    let reads = 0, torn = 0, stop = false;
+    const hammer = (async () => {
+      while (!stop) {
+        try { JSON.parse(fs.readFileSync(raceFile, "utf8")); } catch { torn++; }
+        reads++;
+        await new Promise((r) => setImmediate(r));
+      }
+    })();
+    const runHook = (id) => new Promise((resolve) => {
+      const c = spawn(process.execPath, [hookJs, hookLog, id, raceFile, IP_FRESH.a, IP_FRESH.b]);
+      c.on("exit", resolve);
+    });
+    for (let i = 0; i < 20; i++) await runHook(i % 2 ? "a" : "b");
+    stop = true;
+    await hammer;
+    check("hook ipMap write is atomic across processes (no torn read)", torn === 0 && reads > 0,
+      `reads=${reads} torn=${torn}`);
+  }
+
 
   const pool = spawn(process.execPath, ["pool/pool.js",
     "--listen", `127.0.0.1:${POOL}`, "--status-port", String(STATUS),
