@@ -230,7 +230,18 @@ async function killTree(pid) {
 /* ---------------- subcommands ---------------- */
 
 function cmdVersion() {
-  console.log(`${PROG} ${VERSION} (platform=${PLATFORM} base=${BASE} repo=${REPO})`);
+  console.log(`${PROG} ${VERSION} (commit=${repoCommit()} platform=${PLATFORM} base=${BASE} repo=${REPO})`);
+}
+
+// Short HEAD of THIS clone — the deploy proof for version and /health.
+// Deliberately not git(): that helper die()s when git is absent, and
+// `version`/`start` must degrade to "unknown", never abort (rule 2).
+function repoCommit() {
+  try {
+    const r = spawnSync("git", ["-C", REPO, "rev-parse", "--short", "HEAD"], { encoding: "utf8" });
+    if (r.error || r.status !== 0) return "unknown";
+    return r.stdout.trim() || "unknown";
+  } catch { return "unknown"; }
 }
 
 async function cmdDoctor() {
@@ -364,6 +375,9 @@ async function cmdStart() {
   const old = readPid("router");
   if (pidAlive(old)) { log(`router already running (pid ${old})`); return; }
   log(`starting router :${API_PORT} (mode=${mode}) ...`);
+  // The child inherits env: /health reports this commit so a deploy is
+  // verifiable (status/health must be able to prove WHICH code is running).
+  process.env.ARCHROUTER_COMMIT = repoCommit();
   const extra = (process.env.ARCHROUTER_EXTRA_ARGS || "").trim().split(/\s+/).filter(Boolean);
   const pid = spawnDetached(process.execPath, [SERVER_JS, "--port", API_PORT, "--host", API_HOST, "--mode", mode, ...extra], "router");
   writePid("router", pid);
@@ -942,7 +956,12 @@ async function main() {
     case "doctor": await cmdDoctor(); break;
     case "start": await cmdStart(); break;
     case "stop": await cmdStop(); break;
-    case "restart": await cmdStop(); await sleep(1000); await cmdStart(); break;
+    case "restart":
+      await cmdStop(); await sleep(1000); await cmdStart();
+      // Restart is a deploy: declare success only when healthy (rule 1) —
+      // the old path spawned and returned, leaving "done" unprovable.
+      await waitHealthy(90000, "router after restart");
+      break;
     case "status": await cmdStatus(); break;
     case "logs": cmdLogs(rest[0]); break;
     case "update": await cmdUpdate(rest); break;

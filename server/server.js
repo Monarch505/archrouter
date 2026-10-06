@@ -203,7 +203,9 @@ function applyCors(req, res) {
         return await handleModels(router, req, res, parsed);
       }
       if (p === "/health" || p === "/api/health") {
-        return sendJson(res, 200, { status: "ok", uptimeSeconds: Math.floor(process.uptime()) });
+        // commit = env injected by cmdStart — proves WHICH code is running,
+        // so "restart done" is verifiable instead of assumed.
+        return sendJson(res, 200, { status: "ok", uptimeSeconds: Math.floor(process.uptime()), commit: process.env.ARCHROUTER_COMMIT || "unknown" });
       }
       // Escape hatch: with no enabled key left there is nothing to authenticate
       // against, so the mode switch stays reachable. Otherwise mode=on plus a

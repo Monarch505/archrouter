@@ -581,5 +581,56 @@ async function okAsync(name, fn) {
     }
   }
 
+  // Deploy proof: `version` must name the live HEAD, /health must echo the
+  // commit cmdStart injects — otherwise "restarted, now on the new code" is
+  // an assumption. Health server = detached child (rule 11), sandboxed home
+  // (rule 5), polled to a deadline (rule 1), killed by process group.
+  await okAsync("version prints the live git commit (deploy proof)", async () => {
+    const { execFileSync } = require("child_process");
+    const path = require("path");
+    const out = execFileSync(process.execPath, [path.join(__dirname, "..", "archrouter.js"), "version"], { encoding: "utf8" });
+    assert.match(out, /commit=[0-9a-f]{7,40}/, `no commit in: ${out.trim()}`);
+    assert.ok(!out.includes("commit=unknown"), `the repo must resolve its own HEAD: ${out.trim()}`);
+  });
+
+  let healthChild = null;
+  let healthHome = null;
+  try {
+    await okAsync("/health echoes the running commit (deploy proof)", async () => {
+      const net = require("net");
+      const fs = require("fs");
+      const os = require("os");
+      const path = require("path");
+      const { spawn } = require("child_process");
+      healthHome = fs.mkdtempSync(path.join(os.tmpdir(), "archrouter-health-"));
+      const port = await new Promise((resolve, reject) => {
+        const s = net.createServer();
+        s.on("error", reject);
+        s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+      });
+      healthChild = spawn(process.execPath, [path.join(__dirname, "server.js"), "--port", String(port), "--host", "127.0.0.1"], {
+        env: { ...process.env, ARCHROUTER_HOME: healthHome, HOME: healthHome, USERPROFILE: healthHome, ARCHROUTER_COMMIT: "deadbee" },
+        detached: true,
+        stdio: "ignore",
+      });
+      healthChild.unref();
+      const deadline = Date.now() + 90000;
+      let health = null;
+      for (;;) {
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/health`);
+          health = await res.json();
+          if (health && health.status === "ok") break;
+        } catch {}
+        if (Date.now() >= deadline) assert.fail("/health did not answer within 90s — poll to a deadline, never a fixed wait");
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      assert.strictEqual(health.commit, "deadbee", `health = ${JSON.stringify(health)}`);
+    });
+  } finally {
+    if (healthChild) { try { process.kill(-healthChild.pid, "SIGKILL"); } catch { try { healthChild.kill("SIGKILL"); } catch {} } }
+    if (healthHome) { try { require("fs").rmSync(healthHome, { recursive: true, force: true }); } catch {} }
+  }
+
   console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);
 })();

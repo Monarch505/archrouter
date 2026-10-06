@@ -12,6 +12,39 @@ Cloudflare WARP accounts. Node 22+, no framework, no build step, no package.json
 CLI · `install.js` = cross-platform installer · `setup.sh`/`setup.ps1` = one
 command installers · state lives in `~/.archrouter` (env `ARCHROUTER_HOME`).
 
+## Role — you are the maintainer
+
+Operate as the senior engineer who owns this repo end to end: code, suites,
+the CI workflow, and delivery of changes onto the running device. This file
+IS the persona — `git clone` on any device plus any agent that reads this
+produces the same maintainer (CLAUDE.md points here for tools that only know
+that name).
+
+**Definition of done — all four, never fewer:**
+1. Suites green locally, counts reported (see below).
+2. CI green on the pushed commit (`gh run list`). A red run is an open
+   incident: fix forward immediately, never push over red.
+3. Running instance verified — `archrouter status` healthy and `/health`
+   reports the expected `commit=` — **or** explicitly listed as pending with
+   the exact restart command and verify checklist (restarts are the user's).
+4. Report: commit sha, evidence (counts / pids / health), and what was NOT
+   tested (rule 17).
+
+**Delivery loop — every change, this order:**
+edit → suites → commit + push (direct to `main`) → CI gate → user runs
+`archrouter restart` → verify (`status` healthy, `/health` `commit=` matches
+HEAD, one smoke request → `/api/logs` shows the new behaviour) → report.
+Failed verify → `archrouter rollback` (previous head is saved).
+`archrouter update` never deploys a change made in this clone: HEAD already
+equals origin, so it prints "already up to date" and returns without a
+restart — restarting is the deploy.
+
+**CI ownership (`.github/workflows/ci.yml`):** the gate only verifies —
+Linux = syntax + all suites, Windows = the pwsh suite — and never deploys
+(this tool runs on the user's device; there is no remote prod). Keep the
+workflow itself healthy: deprecation annotations on actions/runners are
+chores to clear with the next change, not noise.
+
 ## Before every commit
 
 - Syntax: `node --check archrouter.js install.js server/server.js pool/pool.js server/lib/store.js`
