@@ -309,26 +309,39 @@ function check(name, cond, extra = "") {
     }
     check("both parallel resets DONE", bothDone);
 
-    // T3: renew refusal must degrade gracefully — hook exits non-zero BEFORE
-    // touching anything, pool keeps the quarantine, tunnel never dies.
-    // Wait out quarantine first so the episode gate cannot skip this report
-    // (that would pass the assertion vacuously).
+    // T3: a refused/failed renew must NOT abort the rotation — it falls back
+    // to the free shuffle. Live 2026-10-07 stall: the daily renew budget hit
+    // 8/8, every limit reset 502'd, and each backend stayed stranded on its
+    // burned IP (later reports are gated by "already quarantined this
+    // episode", so nothing ever moved an IP). Steer the shuffle onto a clean
+    // distinct IP so the rotation completing is observable.
     let clear = false;
     for (let i = 0; i < 8 && !clear; i++) {
       await sleep(1000);
       const stq = JSON.parse((await get("/")).body);
       clear = stq.instances.every((x) => !x.quarantined);
     }
+    for (let i = 0; i < 12; i++) { // let b's per-instance reset cooldown elapse
+      const bi = JSON.parse((await get("/")).body).instances.find((x) => x.id === "b");
+      if (bi && (!bi.lastReset || Date.now() - Date.parse(bi.lastReset) >= 2500)) break;
+      await sleep(500);
+    }
+    fs.writeFileSync(ovrPath, JSON.stringify({ b: "8.8.4.4" }));
     const preLines = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean).length;
-    fs.writeFileSync(refuseFlag, "1");
+    fs.writeFileSync(refuseFlag, "1"); // renew hook exits 1 before touching anything
     const repR = await post("/api/report", { event: "freeusagelimit", instance: "b" });
-    await sleep(2500);
-    const postLines = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean).length;
+    let rotated = false, added = [];
+    for (let i = 0; i < 40 && !rotated; i++) {
+      await sleep(500);
+      added = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean).slice(preLines);
+      const bi = JSON.parse((await get("/")).body).instances.find((x) => x.id === "b");
+      rotated = added.includes("b:shuffle") && !!bi && bi.public_ip === "8.8.4.4";
+    }
     const alive = (await get("/")).code === 200;
     const stR3 = JSON.parse((await get("/")).body);
-    check("renew refusal degrades gracefully",
-      clear && repR.code === 202 && alive && postLines === preLines && stR3.instances.find((i) => i.id === "b").quarantined,
-      `rep=${repR.code} lines ${preLines}→${postLines} clear=${clear}`);
+    check("refused renew falls back to shuffle and still rotates (fresh IP)",
+      clear && repR.code === 202 && alive && rotated && !stR3.instances.find((i) => i.id === "b").quarantined,
+      `rep=${repR.code} clear=${clear} added=${JSON.stringify(added)}`);
     fs.rmSync(refuseFlag, { force: true });
 
     // ---- Regression suite: the 2026-10-07 burn-storm fixes ----
@@ -426,6 +439,13 @@ function check(name, cond, extra = "") {
       check("F3 all-burned: nothing served from burned buckets (direct egress)",
         r1.code === 202 && r2.code === 202 && bothQ && after.a === before.a && after.b === before.b,
         `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok"}`);
+      // F4: the direct fallback above served opencode.ai on the OS egress. A
+      // limit report that carries no instance must not be pinned on whichever
+      // warp backend served last — that stale mapping kept re-quarantining a
+      // healthy backend (and extending its 300s exclusion) on every retry.
+      const repDirect = await post("/api/report", { event: "freeusagelimit" });
+      check("direct-egress limit is not blamed on a warp backend",
+        repDirect.code === 400, `rep=${repDirect.code} ${repDirect.body}`);
     }
   } catch (e) {
     check("no exception", false, e.message);

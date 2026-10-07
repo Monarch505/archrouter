@@ -404,6 +404,11 @@ async function relay(client, host, port) {
   try {
     const direct = await directConnect(host, port);
     totals.direct_fallback += 1;
+    // Mark the host as served by direct egress: a 429 on this connection must
+    // NOT be blamed on whichever warp backend happened to serve last, or the
+    // stale mapping keeps re-quarantining a healthy backend (and extending the
+    // 300s exclusion) on every direct-fallback retry.
+    lastServe[host] = "direct";
     event("serve", "direct", `${host}:${port} (fallback #${totals.direct_fallback}, no usable warp path)`);
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
     client.pipe(direct); direct.pipe(client);
@@ -530,8 +535,21 @@ async function coordinatorReset(id, source, opts = {}) {
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // Attempts after the first are free shuffles — never re-renew mid-retry.
-      const hook = await runHook(id, mode === "renew" && attempt > 1 ? "shuffle" : mode);
+      const attemptMode = mode === "renew" && attempt === 1 ? "renew" : "shuffle";
+      const hook = await runHook(id, attemptMode);
       if (!hook.ok) {
+        // A renew can fail for reasons a shuffle never hits (budget exhausted
+        // for the day, wgcf/Cloudflare refusal, hook killed). Aborting here is
+        // the 2026-10-07 stall: budget hit 8/8, every limit reset 502'd, and
+        // each backend sat on its burned IP for good — later reports in the
+        // episode are gated by "already quarantined", so nothing ever moved an
+        // IP. Fall through to the free shuffle instead; it is the attempt that
+        // can still land a distinct IP at no Cloudflare cost.
+        if (attemptMode === "renew" && attempt < maxAttempts) {
+          event("warn", id, `renew failed (${hook.msg}) → falling back to shuffle`);
+          await sleep(DISTINCT_RETRY_DELAY);
+          continue;
+        }
         event("error", id, `hook failed: ${hook.msg}`);
         return { code: 502, msg: hook.msg };
       }
@@ -593,6 +611,7 @@ function mapEventToBackend(explicitId, eventName) {
   if (explicitId) return backends.find((b) => b.id === explicitId) || null;
   if (eventName && LIMIT_EVENTS.has(String(eventName).toLowerCase())) {
     const lastId = lastServe["opencode.ai"];
+    if (lastId === "direct") return null; // limit on direct egress — no warp backend to blame
     const b = lastId && backends.find((x) => x.id === lastId);
     if (b) return b;
   }
