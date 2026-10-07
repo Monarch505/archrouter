@@ -455,10 +455,13 @@ function check(name, cond, extra = "") {
         `stuck=${stuckB} doneB=${doneB} bLines=${JSON.stringify(bLines)}`);
     }
 
-    // F3: every warp path burned at once → the pool must REFUSE the SOCKS
-    // connection (fail-closed). The old direct fallback served opencode.ai on
-    // the device IP during exactly this window (leak audit 2026-10-07:
-    // fallback #41-55) — a leak, not a feature.
+    // F3: every warp path burned at once → the pool must NOT hand out rep=5
+    // while a WARP tunnel is still dialable (live 2026-10-08 00:54: a hit 429
+    // AND b was excluded for sharing the burned IP → every request got an
+    // instant rep=5 502 for the whole reset window). The last-resort tier
+    // serves through the quarantined backend — still WARP egress, never the
+    // device IP (the old direct fallback, removed in the leak audit, is
+    // still gone: `last_serve` must never gain "direct").
     {
       if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined))))
         throw new Error("F3 setup: backends still quarantined");
@@ -470,16 +473,31 @@ function check(name, cond, extra = "") {
       const after = { a: served("a"), b: served("b") };
       const st = await stNow();
       const bothQ = st.instances.every((i) => i.quarantined);
-      check("F3 all-burned: pool REFUSES (rep=5, no direct egress, nothing served)",
-        r1.code === 202 && r2.code === 202 && bothQ && after.a === before.a && after.b === before.b && /^rep=5/.test(viaErr),
-        `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok (LEAK)"}`);
-      // F4: the refusal must be observable and accounted: a "refused" event
-      // names the connection, the refused counter moved, and `last_serve`
-      // never gains "direct" — the direct path is gone with the fallback.
-      const refusedEvt = st.events.some((e) => e.type === "warn" && String(e.msg).startsWith("refused opencode.ai:443"));
-      check("F4 refusal accounted, direct never recorded",
-        refusedEvt && st.smart_reset.refused >= 1 && !Object.values(st.last_serve).includes("direct"),
-        `refusedEvt=${refusedEvt} refused=${st.smart_reset.refused} last_serve=${JSON.stringify(st.last_serve)}`);
+      const lastResortEvt = st.events.some((e) => String(e.msg).startsWith("last-resort serve opencode.ai:443"));
+      check("F3 all-burned: last-resort serve via WARP (no rep=5, no direct)",
+        r1.code === 202 && r2.code === 202 && bothQ && viaErr === ""
+        && (after.a > before.a || after.b > before.b) && lastResortEvt,
+        `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok"} lrEvt=${lastResortEvt}`);
+      // F4: the last-resort serve is observable and NEVER the direct path:
+      // `last_serve` names a backend, never "direct", and the counter moved.
+      const stF4 = await stNow();
+      check("F4 last-resort accounted, direct never recorded",
+        stF4.smart_reset.last_resort >= 1 && !Object.values(stF4.last_serve).includes("direct")
+        && ["a", "b"].includes(stF4.last_serve["opencode.ai"]),
+        `last_resort=${stF4.smart_reset.last_resort} last_serve=${JSON.stringify(stF4.last_serve)}`);
+    }
+
+    // F4b: true fail-closed still exists — when every backend's CONNECT fails
+    // (here: the destination itself refuses), the pool refuses with rep=5 and
+    // the device IP stays out of the picture.
+    {
+      let viaErr = "";
+      try { await viaPool("127.0.0.1", 1); } catch (e) { viaErr = e.message; }
+      const stF4b = await stNow();
+      const refusedEvt = stF4b.events.some((e) => String(e.msg).startsWith("refused 127.0.0.1:1"));
+      check("F4b dead path: pool REFUSES rep=5, direct never recorded",
+        /^rep=5/.test(viaErr) && refusedEvt && !Object.values(stF4b.last_serve).includes("direct"),
+        `via=${viaErr || "ok (LEAK)"} refusedEvt=${refusedEvt} last_serve=${JSON.stringify(stF4b.last_serve)}`);
     }
 
     // F5: the on-429 account reset must not be throttled by a daily budget —

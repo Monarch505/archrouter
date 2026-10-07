@@ -45,6 +45,16 @@ Linux = syntax + all suites, Windows = the pwsh suite — and never deploys
 workflow itself healthy: deprecation annotations on actions/runners are
 chores to clear with the next change, not noise.
 
+## Hard rule — fail-closed means the device IP, not zero paths
+
+Never egress on the device's own IP. But a **quarantined WARP backend is
+still a WARP backend**: when the healthy selection is empty (limit event +
+shared-IP collateral exclusion, live 2026-10-08 00:54), the relay's
+last-resort tier serves through it — the client gets the upstream's honest
+429 instead of an instant `rep=5` 502 storm. Refuse (rep=5) only when every
+backend's CONNECT itself fails. And a shuffle cannot break a colo-stuck
+shared IP — an `untilDistinct` divergence escalates to exactly ONE renew.
+
 ## Before every commit
 
 - Syntax: `node --check archrouter.js install.js server/server.js pool/pool.js server/lib/store.js`

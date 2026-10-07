@@ -368,6 +368,22 @@ function pickBackend(exclude) {
   return usable[0];
 }
 
+// Tier-2 candidate (last resort): ANY backend not already tried on this
+// connection, regardless of quarantine/health/park. Used only after the
+// healthy selection is empty. Live 2026-10-08 00:54 + 01:14: a limit event
+// quarantined the serving backend AND the sibling was excluded for sharing
+// the burned egress IP — zero candidates, so every client request was
+// instantly refused rep=5 for the whole reset window while perfectly
+// dialable WARP tunnels sat idle. A quarantined backend still egresses via
+// WARP (never the device IP — the fail-closed invariant holds) and answers
+// with the upstream's honest response (usually the 429 that burned it).
+function pickAnyWarp(exclude) {
+  const cands = backends.filter((b) => !exclude || !exclude.has(b.id));
+  if (!cands.length) return null;
+  const held = cands.find((b) => b.id === stickyId);
+  return held || cands[0];
+}
+
 /* ---------------- SOCKS5 server (client → pool) ---------------- */
 
 function replyFail(sock, rep = 0x01) {
@@ -409,25 +425,36 @@ async function serveClient(client) {
 async function relay(client, host, port) {
   let lastErr = null;
   const tried = new Set(); // backends whose dial already failed on THIS connection
-  for (let i = 0; i < backends.length; i++) {
-    const b = pickBackend(tried);
-    if (!b) break; // no usable warp path left → refuse below
-    try {
-      const up = await socks5Connect(b.host, b.port, host, port);
-      b.consecFails = 0; b.lastOk = Date.now();
-      lastServe[host] = b.id;
-      event("serve", b.id, `${host}:${port}`);
-      client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-      client.pipe(up); up.pipe(client);
-      const done = () => { try { client.destroy(); } catch {} try { up.destroy(); } catch {} };
-      client.on("close", done); up.on("close", done);
-      client.on("error", done); up.on("error", done);
-      return;
-    } catch (e) {
-      lastErr = e;
-      tried.add(b.id);
-      b.consecFails += 1;
-      event("warn", b.id, `backend dial failed (${e.message}) fails=${b.consecFails}`);
+  // Tier 1: the normal selection (healthy, non-quarantined, park-aware).
+  // Tier 2 (last resort): every remaining WARP backend, quarantined or not —
+  // still WARP egress, never the device IP. Only when every backend's own
+  // CONNECT fails do we refuse (rep=5) — that is true fail-closed.
+  for (const tier of [0, 1]) {
+    for (let i = 0; i < backends.length; i++) {
+      const b = tier === 0 ? pickBackend(tried) : pickAnyWarp(tried);
+      if (!b) break;
+      try {
+        const up = await socks5Connect(b.host, b.port, host, port);
+        b.consecFails = 0; b.lastOk = Date.now();
+        lastServe[host] = b.id;
+        if (isQuarantined(b) || b.parked || !isHealthy(b)) {
+          totals.last_resort = (totals.last_resort || 0) + 1;
+          event("warn", b.id, `last-resort serve ${host}:${port} (quarantined/unhealthy — still WARP egress)`);
+        } else {
+          event("serve", b.id, `${host}:${port}`);
+        }
+        client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+        client.pipe(up); up.pipe(client);
+        const done = () => { try { client.destroy(); } catch {} try { up.destroy(); } catch {} };
+        client.on("close", done); up.on("close", done);
+        client.on("error", done); up.on("error", done);
+        return;
+      } catch (e) {
+        lastErr = e;
+        tried.add(b.id);
+        b.consecFails += 1;
+        event("warn", b.id, `backend dial failed (${e.message}) fails=${b.consecFails}`);
+      }
     }
   }
   // Fail-closed (leak audit 2026-10-07): never egress with the device's own
@@ -436,7 +463,7 @@ async function relay(client, host, port) {
   // direct fallback put the real egress IP in front of the upstream while
   // every request was supposed to ride WARP.
   totals.refused += 1;
-  event("warn", "-", `refused ${host}:${port} (no usable warp path${lastErr ? `: ${lastErr.message}` : ""})`);
+  event("warn", "-", `refused ${host}:${port} (every warp path failed${lastErr ? `: ${lastErr.message}` : ""})`);
   replyFail(client, 0x05);
 }
 
@@ -532,17 +559,27 @@ async function coordinatorReset(id, source, opts = {}) {
   // backend had quota left, while serves kept flowing in).
   const maxAttempts = untilDistinct ? DISTINCT_RETRIES : 1;
   b.resetting = true;
+  let renewedOnce = false;
   const ipBefore = b.lastIp;
   // Drop the stale IP while the tunnel is down: a half-dead backend must not
   // be reported as an IP conflict (nor keep a keeper slot) on stale data.
   b.lastIp = null;
   event("reset", id, `START source=${source} mode=${mode} currentIP=${ipBefore}${untilDistinct ? " untilDistinct" : ""}`);
   totals.total_resets += 1; // counted per reset CALL (retries are attempts, not resets)
-  if (mode === "renew") totals.renewals += 1; // attempt-counted: a refused register still costs a slot
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // Attempts after the first are free shuffles — never re-renew mid-retry.
-      const attemptMode = mode === "renew" && attempt === 1 ? "renew" : "shuffle";
+      // EXCEPT for untilDistinct divergence (same-ip): a shuffle re-handshakes
+      // the SAME account, and the colo keeps handing back the shared IP (live
+      // 2026-10-08 00:53: five shuffles, five times .130, then both backends
+      // were excluded together and every request 502'd). A shuffle can never
+      // break a shared colo IP — only a renew can. Escalate ONCE mid-loop;
+      // renewedOnce keeps it to a single slot even if the renew also lands
+      // shared, and a refused renew (budget/CF) falls through to shuffle.
+      const attemptMode = mode === "renew" && attempt === 1 ? "renew"
+        : untilDistinct && !renewedOnce && attempt >= 2 ? "renew"
+        : "shuffle";
+      if (attemptMode === "renew") { renewedOnce = true; totals.renewals += 1; }
       const hook = await runHook(id, attemptMode);
       if (!hook.ok) {
         // A renew can fail for reasons a shuffle never hits (budget exhausted
