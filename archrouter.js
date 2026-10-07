@@ -401,7 +401,7 @@ async function startPool() {
   log(`starting pool :${POOL_SOCKS} (backends a=:${WARP_A_SOCKS} b=:${WARP_B_SOCKS}) ...`);
   // The pool's reset hook calls back into THIS launcher. pool.js runs the hook
   // through a shell, so quote every path (Windows paths contain spaces).
-  const self = `"${process.execPath}" "${path.join(REPO, "archrouter.js")}" warp-reset %ID%`;
+  const self = `"${process.execPath}" "${path.join(REPO, "archrouter.js")}" warp-reset %ID% %MODE%`;
   const args = [
     POOL_JS,
     "--listen", `127.0.0.1:${POOL_SOCKS}`,
@@ -929,12 +929,93 @@ function cmdWarpSetup(flags) {
 
 function sleepSync(ms) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no-op */ } }
 
-async function cmdWarpReset(idArg) {
+async function cmdWarpReset(idArg, modeArg) {
   const dir = warpDirname(idArg || "a");
-  if (!dir) die(`usage: ${PROG} warp-reset [a|b]`);
+  const mode = String(modeArg || "shuffle").toLowerCase() === "renew" ? "renew" : "shuffle";
+  if (!dir) die(`usage: ${PROG} warp-reset [a|b] [shuffle|renew]`);
   if (!SINGBOX) die("sing-box not found (run install)");
-  const cfg = path.join(WARP, dir, "sing-box.json");
+  const d = path.join(WARP, dir);
+  const cfg = path.join(d, "sing-box.json");
   if (!fs.existsSync(cfg)) die(`${dir} config missing — run: ${PROG} warp-setup`);
+  if (mode === "renew") {
+    // Budget gate FIRST, before killing anything: a refused renew must leave
+    // the tunnel serving (pool keeps its quarantine → graceful degradation).
+    const budget = Math.max(0, Number(process.env.ARCHROUTER_RENEW_BUDGET || 8));
+    const renewFile = path.join(DATA, "warp-renew.json");
+    const nd = new Date();
+    const day = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
+    let ledger = {};
+    try { ledger = JSON.parse(fs.readFileSync(renewFile, "utf8")) || {}; } catch { ledger = {}; }
+    ledger[day] = ledger[day] || {};
+    const used = Number(ledger[day][dir] || 0);
+    if (used >= budget) die(`${dir}: renew budget exhausted ${used}/${budget} today (ARCHROUTER_RENEW_BUDGET)`);
+    if (!WGCF) die("wgcf not found (run install)");
+    // Attempt-counted BEFORE the register attempt: a Cloudflare refusal still
+    // consumes the slot. Atomic write (tmp + rename) — a truncate-then-write
+    // race already bit this repo once.
+    ledger[day][dir] = used + 1;
+    fs.mkdirSync(DATA, { recursive: true });
+    const tmp = `${renewFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(ledger));
+    fs.renameSync(tmp, renewFile);
+    const old = readPid(dir);
+    if (pidAlive(old)) { await killTree(old); rmPid(dir); log(`${dir} stopped (pid ${old})`); }
+    else log(`${dir} not running (starting fresh)`);
+    const acc = path.join(d, "wgcf-account.toml");
+    const prof = path.join(d, "wgcf-profile.conf");
+    const accBak = `${acc}.bak-renew`;
+    const profBak = `${prof}.bak-renew`;
+    const restartOld = async () => { await startSingbox(dir, portOf(dir)); };
+    const renewDir = path.join(d, "renew-tmp");
+    const regen = () =>
+      spawnSync(process.execPath, [GEN_SINDBOX_JS, d, portOf(dir)], { stdio: "inherit" }).status === 0 &&
+      spawnSync(SINGBOX, ["check", "-c", cfg], { stdio: "inherit" }).status === 0;
+    try {
+      fs.rmSync(renewDir, { recursive: true, force: true });
+      fs.mkdirSync(renewDir, { recursive: true });
+      if (spawnSync(WGCF, ["register", "--accept-tos"], { cwd: renewDir, stdio: "inherit" }).status !== 0) {
+        fs.rmSync(renewDir, { recursive: true, force: true });
+        await restartOld();
+        die(`${dir}: wgcf register failed — old account kept`);
+      }
+      // Same spacing as cmdWarpSetup: back-to-back registrations trip
+      // Cloudflare's "User was rejected" rate limit.
+      sleepSync(8000);
+      if (spawnSync(WGCF, ["generate"], { cwd: renewDir, stdio: "inherit" }).status !== 0) {
+        fs.rmSync(renewDir, { recursive: true, force: true });
+        await restartOld();
+        die(`${dir}: wgcf generate failed — old account kept`);
+      }
+      if (fs.existsSync(acc)) fs.copyFileSync(acc, accBak);
+      if (fs.existsSync(prof)) fs.copyFileSync(prof, profBak);
+      fs.renameSync(path.join(renewDir, "wgcf-account.toml"), acc);
+      fs.renameSync(path.join(renewDir, "wgcf-profile.conf"), prof);
+      fs.rmSync(renewDir, { recursive: true, force: true });
+      if (!regen()) {
+        // Anything after the swap fails → put the old account back and keep it
+        // (.bak-renew stays on success too: manual rollback value).
+        if (fs.existsSync(accBak)) fs.copyFileSync(accBak, acc);
+        if (fs.existsSync(profBak)) fs.copyFileSync(profBak, prof);
+        if (!regen()) log(`${dir}: regen on restored account failed — see ${cfg}`);
+        await restartOld();
+        die(`${dir}: renew failed — old account restored`);
+      }
+      await startSingbox(dir, portOf(dir));
+      log(`${dir} reset done (renew)`);
+      return;
+    } catch (e) {
+      // Thrown fs errors (ENOSPC/EACCES/EBUSY) skip every branch above —
+      // restore + restart here or the tunnel stays dead with budget spent.
+      try {
+        if (fs.existsSync(accBak)) fs.copyFileSync(accBak, acc);
+        if (fs.existsSync(profBak)) fs.copyFileSync(profBak, prof);
+        if (!regen()) log(`${dir}: regen on restored account failed — see ${cfg}`);
+        fs.rmSync(renewDir, { recursive: true, force: true });
+        await restartOld();
+      } catch {}
+      die(`${dir}: renew failed (${e.message}) — old account kept`);
+    }
+  }
   const old = readPid(dir);
   if (pidAlive(old)) { await killTree(old); rmPid(dir); log(`${dir} stopped (pid ${old})`); }
   else log(`${dir} not running (starting fresh)`);
@@ -944,7 +1025,7 @@ async function cmdWarpReset(idArg) {
 
 /* ---------------- dispatch ---------------- */
 
-const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--no-models|--no-key]|warp-setup [--force]|warp-reset [a|b]|doctor|version`;
+const HELP = `Usage: ${PROG} start|stop|restart|status|logs [name]|update [--check|--no-restart|--force|--full]|rollback|uninstall [--yes|--purge]|key [name]|connect-opencode [--no-models|--no-key]|warp-setup [--force]|warp-reset [a|b] [shuffle|renew]|doctor|version`;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -970,7 +1051,7 @@ async function main() {
     case "key": cmdKey(rest[0]); break;
     case "connect-opencode": cmdConnectOpencode(rest); break;
     case "warp-setup": cmdWarpSetup(rest); break;
-    case "warp-reset": await cmdWarpReset(rest[0]); break;
+    case "warp-reset": await cmdWarpReset(rest[0], rest[1]); break;
     default: die(`unknown command '${cmd}' (try: ${PROG} help)`);
   }
 }

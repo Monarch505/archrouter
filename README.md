@@ -107,7 +107,7 @@ archrouter start | stop | restart | status | logs [router|pool|warp-a|warp-b]
 archrouter update [--check|--no-restart|--force|--full]  # self-update from GitHub + restart
 archrouter rollback                                       # restore pre-update version
 archrouter warp-setup [--force]   # 2 WARP accounts + sing-box configs (idempotent; --force burns 2 new slots)
-archrouter warp-reset [a|b]       # bounce one backend (pool coordinator hook)
+archrouter warp-reset [a|b] [shuffle|renew]  # bounce one backend; renew = re-register account for a fresh IP (budgeted)
 archrouter key [name]             # mint another API key
 archrouter connect-opencode [--no-models|--no-key]  # point opencode at this router
 archrouter uninstall [--yes|--purge]  # remove what install put on the machine

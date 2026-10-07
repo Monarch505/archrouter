@@ -211,7 +211,7 @@ const backends = backendDefs.map((d) => {
 // to the backend whose IP actually got burned).
 const lastServe = {};
 
-const totals = { total_resets: 0, success_count: 0, same_ip_count: 0, direct_fallback: 0, park_count: 0, unpark_count: 0, conflict_resets: 0, shared_ip_quarantines: 0 };
+const totals = { total_resets: 0, renewals: 0, success_count: 0, same_ip_count: 0, direct_fallback: 0, park_count: 0, unpark_count: 0, conflict_resets: 0, shared_ip_quarantines: 0 };
 const events = [];
 function event(type, instance, msg) {
   events.push({ time: new Date().toISOString(), type, instance, msg });
@@ -468,9 +468,11 @@ for (const b of backends) void probeBackend(b); // immediate first probe
  * resetting, b keeps serving (and vice versa) — the whole point of two
  * backends. Cooldown is per-instance too. */
 
-function runHook(id) {
+function runHook(id, mode = "shuffle") {
   return new Promise((resolve) => {
-    const cmd = RESET_HOOK.replace(/%ID%/g, id);
+    // %MODE% = shuffle (restart tunnel, free) | renew (re-register account,
+    // new IP). Hooks without the placeholder ignore mode — backward compat.
+    const cmd = RESET_HOOK.replace(/%ID%/g, id).replace(/%MODE%/g, mode);
     log(`[coordinator] hook: ${cmd}`);
     const child = spawn(cmd, { shell: true, stdio: "ignore" });
     const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} resolve({ ok: false, msg: "hook timeout" }); }, HOOK_TIMEOUT);
@@ -505,17 +507,21 @@ async function coordinatorReset(id, source, opts = {}) {
   // trip (observed live 2026-09-30: 429 on .130 → reset → .130 again → DONE,
   // which un-serves the same burned bucket). Verified by test-pool-distinct-ip.
   const avoidIp = SAME_IP_GUARD ? (opts.avoidIp || null) : null;
-  const maxAttempts = untilDistinct ? DISTINCT_RETRIES : 1;
+  const mode = opts.mode === "renew" ? "renew" : "shuffle";
+  // mode=renew re-registers the WARP account — expensive, burns a Cloudflare
+  // slot, rate-limited: NEVER loop it more than once per call (one attempt).
+  const maxAttempts = mode === "renew" ? 1 : (untilDistinct ? DISTINCT_RETRIES : 1);
   b.resetting = true;
   const ipBefore = b.lastIp;
   // Drop the stale IP while the tunnel is down: a half-dead backend must not
   // be reported as an IP conflict (nor keep a keeper slot) on stale data.
   b.lastIp = null;
-  event("reset", id, `START source=${source} currentIP=${ipBefore}${untilDistinct ? " untilDistinct" : ""}`);
+  event("reset", id, `START source=${source} mode=${mode} currentIP=${ipBefore}${untilDistinct ? " untilDistinct" : ""}`);
   totals.total_resets += 1; // counted per reset CALL (retries are attempts, not resets)
+  if (mode === "renew") totals.renewals += 1; // attempt-counted: a refused register still costs a slot
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const hook = await runHook(id);
+      const hook = await runHook(id, mode);
       if (!hook.ok) {
         event("error", id, `hook failed: ${hook.msg}`);
         return { code: 502, msg: hook.msg };
@@ -620,10 +626,16 @@ const api = http.createServer((req, res) => {
         // background for a fresh IP. Respond immediately so the router's
         // next retry attempt already lands on the healthy backend.
         const burnedIp = b.lastIp;
+        const wasQuarantined = isQuarantined(b);
         b.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
         event("quarantine", b.id, `excluded from RR for ${QUARANTINE_SECS}s (limit event)`);
-        if (AUTO_RESET) {
-          coordinatorReset(b.id, "api-limit", { untilDistinct: true, avoidIp: burnedIp }).then((r) => {
+        // First hit of a quarantine episode only: later reports in the same
+        // episode find the backend already blocked from serving, so a renew
+        // then would burn a slot for nothing.
+        let resetStarted = false;
+        if (AUTO_RESET && !wasQuarantined) {
+          resetStarted = true;
+          coordinatorReset(b.id, "api-limit", { untilDistinct: true, avoidIp: burnedIp, mode: "renew" }).then((r) => {
             if (r.code !== 200 && r.code !== 202) log(`[coordinator] background reset ${b.id}: ${r.code} ${r.msg}`);
           });
         }
@@ -634,17 +646,20 @@ const api = http.createServer((req, res) => {
         const twins = backends.filter((x) => x !== b && burnedIp && x.lastIp === burnedIp);
         for (const t of twins) {
           totals.shared_ip_quarantines += 1;
+          const tWasQuarantined = isQuarantined(t);
           t.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
           event("quarantine", t.id, `shares burned IP ${burnedIp} with ${b.id} → also excluded for ${QUARANTINE_SECS}s`);
-          if (AUTO_RESET) {
+          if (AUTO_RESET && !tWasQuarantined) {
+            resetStarted = true;
             setTimeout(() => {
-              coordinatorReset(t.id, "shared-ip", { untilDistinct: true, avoidIp: burnedIp }).then((r) => {
+              coordinatorReset(t.id, "shared-ip", { untilDistinct: true, avoidIp: burnedIp, mode: "renew" }).then((r) => {
                 if (r.code !== 200 && r.code !== 202) log(`[coordinator] shared-ip reset ${t.id}: ${r.code} ${r.msg}`);
               });
             }, DISTINCT_RETRY_DELAY);
           }
         }
-        return sendJson(res, 202, { ok: true, msg: `backend ${b.id} quarantined, reset started${twins.length ? ` (+${twins.map((t) => t.id).join(",")} same IP)` : ""}` });
+        const resetNote = resetStarted ? "reset started" : "reset skipped (already quarantined this episode)";
+        return sendJson(res, 202, { ok: true, msg: `backend ${b.id} quarantined, ${resetNote}${twins.length ? ` (+${twins.map((t) => t.id).join(",")} same IP)` : ""}` });
       }
       const r = await coordinatorReset(b.id, "api", { untilDistinct: true });
       return sendJson(res, r.code, { ok: r.code === 200, msg: r.msg }, r.retryAfter ? { "Retry-After": String(r.retryAfter) } : {});

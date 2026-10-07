@@ -35,14 +35,18 @@ const IP_FRESH = { a: "8.8.8.8", b: "9.9.9.9" };
 fs.writeFileSync(ipMap, JSON.stringify(IP_START));
 const hookPathArg = hookLog.replace(/\\/g, "\\\\");
 const ipMapArg = ipMap.replace(/\\/g, "\\\\");
+const refuseFlag = path.join(tmp, "renew-refuse");
+const refuseArg = refuseFlag.replace(/\\/g, "\\\\");
 const freshArg = JSON.stringify(IP_FRESH);
 // The reset hook is executed by pool.js through a SHELL, so keep every
 // argument free of quotes/braces — cmd.exe mangles JSON blobs in a command line.
-// argv: [node, hook.js, <hookLog>, <id>, <ipMap>, <ipA>, <ipB>]
+// argv: [node, hook.js, <hookLog>, <id>, <ipMap>, <ipA>, <ipB>, <mode>]
 fs.writeFileSync(hookJs, `
 const fs = require("fs");
 const id = process.argv[3];
-fs.appendFileSync(process.argv[2], id + "\\n");
+const mode = process.argv[7] || "none";
+if (mode === "renew" && fs.existsSync("${refuseArg}")) process.exit(1);
+fs.appendFileSync(process.argv[2], id + ":" + mode + "\\n");
 const m = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
 m[id] = id === "a" ? process.argv[5] : process.argv[6];   // bounce -> new egress IP
 // Atomic replace: the fake backend parses this file FROM ANOTHER PROCESS on
@@ -195,7 +199,7 @@ function check(name, cond, extra = "") {
   const pool = spawn(process.execPath, ["pool/pool.js",
     "--listen", `127.0.0.1:${POOL}`, "--status-port", String(STATUS),
     "--backend", `a=127.0.0.1:${FAKE_A}`, "--backend", `b=127.0.0.1:${FAKE_B}`,
-    "--reset-hook", `node "${hookJs}" "${hookPathArg}" %ID% "${ipMapArg}" ${IP_FRESH.a} ${IP_FRESH.b}`,
+    "--reset-hook", `node "${hookJs}" "${hookPathArg}" %ID% "${ipMapArg}" ${IP_FRESH.a} ${IP_FRESH.b} %MODE%`,
     "--health-url", `http://127.0.0.1:${HEALTH}/`,
     "--health-interval", "60", "--health-fail-thr", "3",
     "--distinct-retries", "2", "--distinct-retry-delay", "1",
@@ -222,6 +226,9 @@ function check(name, cond, extra = "") {
     // 429/403 limit report → 202 quarantine of the SERVING backend
     const rep = await post("/api/report", { event: "freeusagelimit" });
     check("limit report → 202 quarantine", rep.code === 202, rep.body);
+    // Second report inside the SAME quarantine episode: the gate must skip it
+    // (one renew per episode — asserted below as smart_reset.renewals === 1).
+    await post("/api/report", { event: "freeusagelimit" });
     const st1 = JSON.parse((await get("/")).body);
     const q = st1.instances.find((i) => i.quarantined);
     check("quarantined == serving backend", !!q && q.id === servedBy, `quarantined=${q && q.id} servedBy=${servedBy}`);
@@ -241,6 +248,10 @@ function check(name, cond, extra = "") {
       try { hookIds = fs.readFileSync(hookLog, "utf8"); } catch {}
     }
     check("reset hook fired for burned backend", hookIds.includes(servedBy), `hooks=${JSON.stringify(hookIds.trim())}`);
+    // Without %MODE% substitution the pool passes the literal %MODE% through,
+    // so the line reads "a:%MODE%" and this fails (rule 16).
+    check("limit reset renews the account (mode=renew)", hookIds.includes(`${servedBy}:renew`),
+      `hooks=${JSON.stringify(hookIds.trim())}`);
 
     // reset completes (verify via local health through fake forwarders)
     let done = false;
@@ -250,6 +261,13 @@ function check(name, cond, extra = "") {
       done = st.events.some((e) => e.type === "reset" && e.instance === servedBy && e.msg.startsWith("DONE"));
     }
     check("background reset DONE", done);
+
+    // Exactly one renew for this episode: report #2 (above) must have been
+    // skipped by the quarantine gate. Checked BEFORE rep2 below, which
+    // legitimately starts episode #2.
+    const stR = JSON.parse((await get("/")).body);
+    check("one renew per episode (second report skipped)", stR.smart_reset.renewals === 1,
+      `renewals=${stR.smart_reset.renewals}`);
 
     // quarantine expires (same IP → flag kept until timeout)
     await sleep(8000);
@@ -275,6 +293,28 @@ function check(name, cond, extra = "") {
       bothDone = dones.includes("a") && dones.includes("b");
     }
     check("both parallel resets DONE", bothDone);
+
+    // T3: renew refusal must degrade gracefully — hook exits non-zero BEFORE
+    // touching anything, pool keeps the quarantine, tunnel never dies.
+    // Wait out quarantine first so the episode gate cannot skip this report
+    // (that would pass the assertion vacuously).
+    let clear = false;
+    for (let i = 0; i < 8 && !clear; i++) {
+      await sleep(1000);
+      const stq = JSON.parse((await get("/")).body);
+      clear = stq.instances.every((x) => !x.quarantined);
+    }
+    const preLines = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean).length;
+    fs.writeFileSync(refuseFlag, "1");
+    const repR = await post("/api/report", { event: "freeusagelimit", instance: "b" });
+    await sleep(2500);
+    const postLines = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean).length;
+    const alive = (await get("/")).code === 200;
+    const stR3 = JSON.parse((await get("/")).body);
+    check("renew refusal degrades gracefully",
+      clear && repR.code === 202 && alive && postLines === preLines && stR3.instances.find((i) => i.id === "b").quarantined,
+      `rep=${repR.code} lines ${preLines}→${postLines} clear=${clear}`);
+    fs.rmSync(refuseFlag, { force: true });
   } catch (e) {
     check("no exception", false, e.message);
   } finally {
