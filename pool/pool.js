@@ -107,6 +107,14 @@ process.on("unhandledRejection", (e) => { log(`FATAL unhandled rejection: ${e &&
 
 /* ---------------- SOCKS5 client (pool → backend) ---------------- */
 
+const SOCK_REP = new Map([
+  [0x00, "succeeded"], [0x01, "general SOCKS server failure"],
+  [0x02, "connection not allowed by ruleset"], [0x03, "network unreachable"],
+  [0x04, "host unreachable"], [0x05, "connection refused"],
+  [0x06, "TTL expired"], [0x07, "command not supported"],
+  [0x08, "address type not supported"],
+]);
+
 function socks5Connect(proxyHost, proxyPort, dstHost, dstPort, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     let sock = null;
@@ -130,7 +138,8 @@ function socks5Connect(proxyHost, proxyPort, dstHost, dstPort, timeoutMs = 10000
               (dstPort >> 8) & 0xff, dstPort & 0xff]);
             sock.write(req);
           } else if (stage === 1 && buf.length >= 10) {
-            if (buf[1] !== 0x00) return done(Object.assign(new Error(`socks5 connect failed rep=${buf[1]}`), { rep: buf[1] }));
+            const rep = buf[1];
+            if (rep !== 0x00) return done(Object.assign(new Error(`socks5 CONNECT failed; rep=${rep} ${SOCK_REP.get(rep) || "unknown"}`), { rep }));
             sock.removeAllListeners("data");
             done(null, sock);
           }
