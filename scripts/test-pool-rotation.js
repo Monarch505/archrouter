@@ -249,6 +249,28 @@ function check(name, cond, extra = "") {
       svcSticky[servedBy] === 3 && svcSticky[sibling] === 0,
       `svc=${JSON.stringify(svcSticky)} servedBy=${servedBy}`);
 
+    // Dial-fail failover (leak audit 2026-10-07): with the sticky backend's
+    // listener closed the dial REFUSES — the pool must try the sibling once
+    // and serve through it (tried-set, no dead-end retry loop), and must never
+    // egress direct without a warp path. example.com keeps
+    // last_serve["opencode.ai"] — which the rotation below reports on —
+    // pointing at the backend that really served it.
+    {
+      const dieTag = servedBy;
+      const sibTag = sibling;
+      const dieSrv = dieTag === "a" ? srvA : srvB;
+      const diePort = dieTag === "a" ? FAKE_A : FAKE_B;
+      const beforeC = { a: served("a"), b: served("b") };
+      await new Promise((res) => dieSrv.close(res));
+      let err = "";
+      try { await viaPool("example.com", 443); } catch (e) { err = e.message; }
+      await new Promise((res) => dieSrv.listen(diePort, "127.0.0.1", res));
+      const afterC = { a: served("a"), b: served("b") };
+      check("dial-failed sticky backend → sibling serves (no retry, no direct egress)",
+        err === "" && afterC[sibTag] === beforeC[sibTag] + 1 && afterC[dieTag] === beforeC[dieTag],
+        `err=${err} before=${JSON.stringify(beforeC)} after=${JSON.stringify(afterC)}`);
+    }
+
     // 429/403 limit report → 202 quarantine of the SERVING backend
     const rep = await post("/api/report", { event: "freeusagelimit" });
     check("limit report → 202 quarantine", rep.code === 202, rep.body);
@@ -433,9 +455,10 @@ function check(name, cond, extra = "") {
         `stuck=${stuckB} doneB=${doneB} bLines=${JSON.stringify(bLines)}`);
     }
 
-    // F3: with every warp path burned, the pool must serve nothing from the
-    // burned buckets — traffic falls back to direct egress instead of the
-    // serve→report→serve loop.
+    // F3: every warp path burned at once → the pool must REFUSE the SOCKS
+    // connection (fail-closed). The old direct fallback served opencode.ai on
+    // the device IP during exactly this window (leak audit 2026-10-07:
+    // fallback #41-55) — a leak, not a feature.
     {
       if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined))))
         throw new Error("F3 setup: backends still quarantined");
@@ -447,16 +470,16 @@ function check(name, cond, extra = "") {
       const after = { a: served("a"), b: served("b") };
       const st = await stNow();
       const bothQ = st.instances.every((i) => i.quarantined);
-      check("F3 all-burned: nothing served from burned buckets (direct egress)",
-        r1.code === 202 && r2.code === 202 && bothQ && after.a === before.a && after.b === before.b,
-        `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok"}`);
-      // F4: the direct fallback above served opencode.ai on the OS egress. A
-      // limit report that carries no instance must not be pinned on whichever
-      // warp backend served last — that stale mapping kept re-quarantining a
-      // healthy backend (and extending its 300s exclusion) on every retry.
-      const repDirect = await post("/api/report", { event: "freeusagelimit" });
-      check("direct-egress limit is not blamed on a warp backend",
-        repDirect.code === 400, `rep=${repDirect.code} ${repDirect.body}`);
+      check("F3 all-burned: pool REFUSES (rep=5, no direct egress, nothing served)",
+        r1.code === 202 && r2.code === 202 && bothQ && after.a === before.a && after.b === before.b && /^rep=5/.test(viaErr),
+        `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok (LEAK)"}`);
+      // F4: the refusal must be observable and accounted: a "refused" event
+      // names the connection, the refused counter moved, and `last_serve`
+      // never gains "direct" — the direct path is gone with the fallback.
+      const refusedEvt = st.events.some((e) => e.type === "warn" && String(e.msg).startsWith("refused opencode.ai:443"));
+      check("F4 refusal accounted, direct never recorded",
+        refusedEvt && st.smart_reset.refused >= 1 && !Object.values(st.last_serve).includes("direct"),
+        `refusedEvt=${refusedEvt} refused=${st.smart_reset.refused} last_serve=${JSON.stringify(st.last_serve)}`);
     }
 
     // F5: the on-429 account reset must not be throttled by a daily budget —

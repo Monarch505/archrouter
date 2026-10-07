@@ -632,5 +632,25 @@ async function okAsync(name, fn) {
     if (healthHome) { try { require("fs").rmSync(healthHome, { recursive: true, force: true }); } catch {} }
   }
 
+  // Leak audit 2026-10-07: the catalog refresh must ride the proxy the chat
+  // attempts ride (warp = pool SOCKS) — a direct fetch hands opencode.ai the
+  // device IP on a 300s timer. Fails without the proxy wiring (rule 16).
+  await okAsync("models catalog fetch goes through the active proxy (never direct)", async () => {
+    const transport = require("./lib/transport.js");
+    const { ModelCache } = require("./lib/models.js");
+    const orig = transport.request;
+    let seen = null;
+    transport.request = async (opts) => { seen = opts; return { status: 200, json: { data: [{ id: "leaktest-free", object: "model" }] } }; };
+    try {
+      const mc = new ModelCache({ models: { cacheSeconds: 0 } }, { mode: "warp", nextProxy: () => "socks5h://127.0.0.1:11801" });
+      await mc.refresh(true);
+    } finally {
+      transport.request = orig;
+    }
+    assert.ok(seen, "transport.request never called");
+    assert.strictEqual(seen.proxy, "socks5h://127.0.0.1:11801");
+    assert.strictEqual(seen.proxyStyle, "socks5");
+  });
+
   console.log(`\n${pass} passed${process.exitCode ? " (WITH FAILURES)" : ""}`);
 })();

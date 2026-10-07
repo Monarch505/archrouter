@@ -71,7 +71,7 @@ async function main() {
   process.stdout.write(BANNER);
 
 const proxyRouter = new ProxyRouter(cfg);
-  const modelCache = new ModelCache(cfg);
+  const modelCache = new ModelCache(cfg, proxyRouter);
   const router = new Router({ config: cfg, proxyRouter, modelCache });
 
   // Seed SQLite from config (manual proxies + combos), then load the

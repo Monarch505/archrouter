@@ -299,12 +299,18 @@ async function cmdDoctor() {
   if (up) {
     const t = await warpTrace(up.port);
     say(!!t && /^104\./.test(t), `warp ${up.dir} egress=${t || "no answer"}`);
+    // Probe upstream THROUGH the tunnel: a direct curl here would hand
+    // opencode.ai the device IP — the leak the warp path exists to hide
+    // (audit 2026-10-07). Fail closed: no warp path → no probe.
+    // socks5h (remote DNS) is required here: plain socks5:// makes curl
+    // resolve on-device and the CONNECT dies with exit 97 through sing-box
+    // (verified live 2026-10-07; the tunnel's own resolution returns 200).
+    const models = await curl(["-s", "-o", IS_WIN ? "NUL" : "/dev/null", "-m", "8", "-x", `socks5h://127.0.0.1:${up.port}`, "https://opencode.ai/zen/v1/models"]);
+    say(models !== null, "upstream opencode.ai reachable (via warp)");
   } else {
     console.log("  [--] warp trace skipped (no instance running)");
+    console.log("  [--] upstream probe skipped (no warp path — a direct probe would leak the device IP)");
   }
-
-  const models = await curl(["-s", "-o", IS_WIN ? "NUL" : "/dev/null", "-m", "8", "https://opencode.ai/zen/v1/models"]);
-  say(models !== null, "upstream opencode.ai reachable");
 
   const authLine = authStatus();
   const modeTxt = authLine.mode && authLine.mode !== "auto" ? ` [mode=${authLine.mode}]` : "";

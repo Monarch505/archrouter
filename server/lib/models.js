@@ -2,6 +2,8 @@
 /*
  * models.js — live model list from opencode.ai/zen/v1/models, cached.
  * Exposes models under the configured prefix (default "oc/").
+ * The fetch rides the active proxy (warp mode: the pool SOCKS), like every
+ * chat attempt — a direct fetch would expose the device IP (leak audit 2026-10-07).
  */
 
 const transport = require("./transport.js");
@@ -9,8 +11,9 @@ const logger = require("./logger.js");
 const { capsFor, isFreeModel, freeOnlyEnabled } = require("./modelCaps.js");
 
 class ModelCache {
-  constructor(config) {
+  constructor(config, proxyRouter) {
     this.config = config;
+    this.proxyRouter = proxyRouter || null;
     this.data = null;
     this.fetchedAt = null;
     this.inFlight = null;
@@ -30,7 +33,12 @@ class ModelCache {
         "User-Agent": `opencode/${this.config.release || "1.18.18"}`,
       };
       try {
-        const resp = await transport.request({ url, headers, timeoutMs: 20000, json: true });
+        // Same proxy wiring as every chat attempt in router.js: in warp mode
+        // this catalog request goes through the pool SOCKS — never direct.
+        const proxy = this.proxyRouter ? this.proxyRouter.nextProxy() : null;
+        const proxyStyle = this.proxyRouter?.mode === "upstream" ? "forward"
+          : this.proxyRouter?.mode === "warp" ? "socks5" : "tunnel";
+        const resp = await transport.request({ url, headers, timeoutMs: 20000, json: true, proxy, proxyStyle });
         if (resp.status === 200 && Array.isArray(resp.json?.data)) {
           const prefix = this.config.models?.prefix || "oc/";
           const freeOnly = freeOnlyEnabled(this.config);

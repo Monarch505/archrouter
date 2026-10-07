@@ -38,10 +38,14 @@
  * A parked backend keeps retrying in the background (park-retry-delay) and
  * rejoins RR as soon as it reports a distinct IP. Guard off: --same-ip-guard 0.
  *
- * Always-on: when no warp backend is healthy (or all dials fail), the pool
- * serves via direct TCP egress and counts it in totals.direct_fallback.
+ * Fail-closed (leak audit 2026-10-07): when no warp backend is usable (all
+ * quarantined/unhealthy, or every dial failed) the pool REFUSES the SOCKS
+ * CONNECT — it never falls back to direct TCP egress, which would put the
+ * device's real IP in front of the upstream. Refusals are counted in
+ * totals.refused and logged as a "refused" warn event.
  * --auto-reset 0 disables coordinator resets (useful on UDP-filtered
- * networks where resets can never succeed); traffic still flows direct.
+ * networks where resets can never succeed); traffic still rides warp while
+ * any backend is usable, and is refused when none is.
  */
 
 const net = require("net");
@@ -212,7 +216,7 @@ const backends = backendDefs.map((d) => {
 // to the backend whose IP actually got burned).
 const lastServe = {};
 
-const totals = { total_resets: 0, renewals: 0, success_count: 0, same_ip_count: 0, direct_fallback: 0, park_count: 0, unpark_count: 0, conflict_resets: 0, shared_ip_quarantines: 0 };
+const totals = { total_resets: 0, renewals: 0, success_count: 0, same_ip_count: 0, refused: 0, park_count: 0, unpark_count: 0, conflict_resets: 0, shared_ip_quarantines: 0 };
 const events = [];
 function event(type, instance, msg) {
   events.push({ time: new Date().toISOString(), type, instance, msg });
@@ -326,7 +330,7 @@ let stickyId = null;
 function isQuarantined(b, now = Date.now()) {
   return b.quarantineUntil > now;
 }
-function pickBackend() {
+function pickBackend(exclude) {
   const now = Date.now();
   const healthy = (b) => isHealthy(b) && !isQuarantined(b, now);
   // Serve-guard: never hand traffic to two accounts sharing one egress IP.
@@ -335,12 +339,16 @@ function pickBackend() {
   // Keeper itself is quarantined/down: prefer a parked healthy backend over a
   // burned one — still a single account on the shared IP, traffic keeps flowing.
   const healthyParked = backends.filter((b) => healthy(b) && b.parked);
-  const usable = fresh.length ? fresh : healthyParked;
+  const pool0 = fresh.length ? fresh : healthyParked;
+  // `exclude` carries the backends already tried on THIS connection: after a
+  // dial failure the retry must move to the sibling, never re-pick the dead one.
+  const usable = exclude ? pool0.filter((b) => !exclude.has(b.id)) : pool0;
   if (!usable.length) {
     // Every remaining backend is quarantined (its egress IP has a burned quota
     // bucket: dialing succeeds but every upstream request 429s — which is how
-    // the serve→report→serve loop of 2026-10-07 kept burning) or unhealthy.
-    // Signal that instead of picking one; the relay falls back to direct egress.
+    // the serve→report→serve loop of 2026-10-07 kept burning), unhealthy —
+    // or already tried on this connection. Signal that instead of picking one;
+    // the relay refuses instead of ever egressing direct.
     return null;
   }
   // Sticky: hold the backend already in use when it is still usable; only a
@@ -391,9 +399,10 @@ async function serveClient(client) {
 
 async function relay(client, host, port) {
   let lastErr = null;
+  const tried = new Set(); // backends whose dial already failed on THIS connection
   for (let i = 0; i < backends.length; i++) {
-    const b = pickBackend();
-    if (!b) break; // no healthy warp path → direct fallback below
+    const b = pickBackend(tried);
+    if (!b) break; // no usable warp path left → refuse below
     try {
       const up = await socks5Connect(b.host, b.port, host, port);
       b.consecFails = 0; b.lastOk = Date.now();
@@ -407,43 +416,19 @@ async function relay(client, host, port) {
       return;
     } catch (e) {
       lastErr = e;
+      tried.add(b.id);
       b.consecFails += 1;
       event("warn", b.id, `backend dial failed (${e.message}) fails=${b.consecFails}`);
     }
   }
-  // Always-on: all warp backends down (e.g. UDP-filtered mobile network) →
-  // direct TCP egress so traffic keeps flowing. Uses the OS resolver
-  // (works where sing-box's built-in resolver has no stub, e.g. Termux).
-  try {
-    const direct = await directConnect(host, port);
-    totals.direct_fallback += 1;
-    // Mark the host as served by direct egress: a 429 on this connection must
-    // NOT be blamed on whichever warp backend happened to serve last, or the
-    // stale mapping keeps re-quarantining a healthy backend (and extending the
-    // 300s exclusion) on every direct-fallback retry.
-    lastServe[host] = "direct";
-    event("serve", "direct", `${host}:${port} (fallback #${totals.direct_fallback}, no usable warp path)`);
-    client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-    client.pipe(direct); direct.pipe(client);
-    const done = () => { try { client.destroy(); } catch {} try { direct.destroy(); } catch {} };
-    client.on("close", done); direct.on("close", done);
-    client.on("error", done); direct.on("error", done);
-    return;
-  } catch (e) {
-    lastErr = e;
-    event("error", "-", `direct fallback failed for ${host}:${port}: ${e.message}`);
-  }
-  event("error", "-", `no backend for ${host}:${port}: ${lastErr && lastErr.message}`);
+  // Fail-closed (leak audit 2026-10-07): never egress with the device's own
+  // IP. When no warp backend is usable (all quarantined/unhealthy, or every
+  // dial failed), refuse the CONNECT instead of dialing direct — the old
+  // direct fallback put the real egress IP in front of the upstream while
+  // every request was supposed to ride WARP.
+  totals.refused += 1;
+  event("warn", "-", `refused ${host}:${port} (no usable warp path${lastErr ? `: ${lastErr.message}` : ""})`);
   replyFail(client, 0x05);
-}
-
-function directConnect(host, port, timeoutMs = 15000) {
-  return new Promise((resolve, reject) => {
-    const sock = net.connect(port, host);
-    const timer = setTimeout(() => { sock.destroy(); reject(new Error("direct dial timeout")); }, timeoutMs);
-    sock.once("connect", () => { clearTimeout(timer); resolve(sock); });
-    sock.once("error", (e) => { clearTimeout(timer); reject(e); });
-  });
 }
 
 /* ---------------- health probe ---------------- */
