@@ -940,7 +940,12 @@ async function cmdWarpReset(idArg, modeArg) {
   if (mode === "renew") {
     // Budget gate FIRST, before killing anything: a refused renew must leave
     // the tunnel serving (pool keeps its quarantine → graceful degradation).
-    const budget = Math.max(0, Number(process.env.ARCHROUTER_RENEW_BUDGET || 8));
+    // DEFAULT IS UNCAPPED: the pool resets the account on every 429, so the
+    // user's rule is "429 → renew now", not "renew at most 8 a day". A capped
+    // day (8/8) made every limit reset die before registering and stranded the
+    // backend on its burned IP (2026-10-07). Set ARCHROUTER_RENEW_BUDGET=N
+    // (positive) only if you want to throttle Cloudflare registrations.
+    const budget = Math.max(0, Number(process.env.ARCHROUTER_RENEW_BUDGET || 0));
     const renewFile = path.join(DATA, "warp-renew.json");
     const nd = new Date();
     const day = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
@@ -948,7 +953,7 @@ async function cmdWarpReset(idArg, modeArg) {
     try { ledger = JSON.parse(fs.readFileSync(renewFile, "utf8")) || {}; } catch { ledger = {}; }
     ledger[day] = ledger[day] || {};
     const used = Number(ledger[day][dir] || 0);
-    if (used >= budget) die(`${dir}: renew budget exhausted ${used}/${budget} today (ARCHROUTER_RENEW_BUDGET)`);
+    if (budget > 0 && used >= budget) die(`${dir}: renew budget exhausted ${used}/${budget} today (ARCHROUTER_RENEW_BUDGET)`);
     if (!WGCF) die("wgcf not found (run install)");
     // Attempt-counted BEFORE the register attempt: a Cloudflare refusal still
     // consumes the slot. Atomic write (tmp + rename) — a truncate-then-write

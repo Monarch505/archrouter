@@ -238,6 +238,17 @@ function check(name, cond, extra = "") {
     const servedBy = svc.a === 1 && svc.b === 0 ? "a" : svc.b === 1 && svc.a === 0 ? "b" : "?";
     check("request served via pool", servedBy !== "?", `svc=${JSON.stringify(svc)}`);
 
+    // Selection is STICKY, not round-robin: two more requests must keep using
+    // the SAME backend, so the sibling's egress IP stays fresh for the failover
+    // below (round-robin would split 3 serves as 2/1 and burn both IPs at once).
+    await viaPool("opencode.ai", 443);
+    await viaPool("opencode.ai", 443);
+    const svcSticky = { a: served("a"), b: served("b") };
+    const sibling = servedBy === "a" ? "b" : "a";
+    check("sticky selection: one backend serves until it 429s (no round-robin)",
+      svcSticky[servedBy] === 3 && svcSticky[sibling] === 0,
+      `svc=${JSON.stringify(svcSticky)} servedBy=${servedBy}`);
+
     // 429/403 limit report → 202 quarantine of the SERVING backend
     const rep = await post("/api/report", { event: "freeusagelimit" });
     check("limit report → 202 quarantine", rep.code === 202, rep.body);
@@ -446,6 +457,42 @@ function check(name, cond, extra = "") {
       const repDirect = await post("/api/report", { event: "freeusagelimit" });
       check("direct-egress limit is not blamed on a warp backend",
         repDirect.code === 400, `rep=${repDirect.code} ${repDirect.body}`);
+    }
+
+    // F5: the on-429 account reset must not be throttled by a daily budget —
+    // the pool re-registers the WARP account on EVERY limit event. Hermetic:
+    // sandbox ARCHROUTER_HOME with a stub sing-box + config and no wgcf, so the
+    // run must get PAST the budget gate and stop at "wgcf not found". An
+    // explicitly-set ARCHROUTER_RENEW_BUDGET still caps it (opt-in throttle).
+    {
+      const { spawnSync } = require("child_process");
+      const sb = fs.mkdtempSync(path.join(os.tmpdir(), "renewbudget-"));
+      const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+      const sbName = process.platform === "win32" ? "sing-box.exe" : "sing-box";
+      for (const dir of [arch, arch === "aarch64" ? "arm64" : "x64"]) {
+        fs.mkdirSync(path.join(sb, "bin", dir), { recursive: true });
+        fs.writeFileSync(path.join(sb, "bin", dir, sbName), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      }
+      const iDir = path.join(sb, "warp", "warp-a");
+      fs.mkdirSync(iDir, { recursive: true });
+      fs.writeFileSync(path.join(iDir, "sing-box.json"), "{}");
+      fs.mkdirSync(path.join(sb, "data"), { recursive: true });
+      const d = new Date();
+      const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      fs.writeFileSync(path.join(sb, "data", "warp-renew.json"), JSON.stringify({ [day]: { "warp-a": 99 } }));
+      // PATH emptied so findBin cannot pick up a real wgcf (never touch WARP).
+      const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, "..", "archrouter.js"), "warp-reset", "a", "renew"], {
+        encoding: "utf8", env: { ...process.env, ARCHROUTER_HOME: sb, HOME: sb, USERPROFILE: sb, PATH: "", ...extra },
+      });
+      const outOf = (r) => `${r.stdout || ""}${r.stderr || ""}`;
+      const uncapped = outOf(run({}));
+      const capped = outOf(run({ ARCHROUTER_RENEW_BUDGET: "1" }));
+      check("renew is uncapped by default (99 renews today do not block the reset)",
+        !uncapped.includes("budget exhausted") && uncapped.includes("wgcf not found"),
+        uncapped.trim().slice(-140));
+      check("ARCHROUTER_RENEW_BUDGET still throttles when explicitly set",
+        capped.includes("budget exhausted"), capped.trim().slice(-140));
+      fs.rmSync(sb, { recursive: true, force: true });
     }
   } catch (e) {
     check("no exception", false, e.message);

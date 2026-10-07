@@ -315,27 +315,40 @@ function sweepParked() {
 }
 setInterval(sweepParked, SWEEP_INTERVAL);
 
-let rrIndex = 0;
+// The backend currently in use. Selection is STICKY, not round-robin: keep
+// serving the same backend until a 429/quarantine/park takes it out, then
+// switch to the sibling. That is what keeps the other account's egress IP
+// unused and fresh for the moment the first one has to be reset
+// (a 429 → serve b while a renews; b 429 → serve a while b renews). Round-
+// robin spread the load across both, so both burned within seconds of each
+// other and there was no fresh account left to fail over to (2026-10-07).
+let stickyId = null;
 function isQuarantined(b, now = Date.now()) {
   return b.quarantineUntil > now;
 }
 function pickBackend() {
   const now = Date.now();
-  const pick = (list) => { const b = list[rrIndex % list.length]; rrIndex += 1; return b; };
   const healthy = (b) => isHealthy(b) && !isQuarantined(b, now);
   // Serve-guard: never hand traffic to two accounts sharing one egress IP.
   // Parked backends stay out of RR as long as a keeper exists.
   const fresh = backends.filter((b) => healthy(b) && !b.parked);
-  if (fresh.length) return pick(fresh);
   // Keeper itself is quarantined/down: prefer a parked healthy backend over a
   // burned one — still a single account on the shared IP, traffic keeps flowing.
   const healthyParked = backends.filter((b) => healthy(b) && b.parked);
-  if (healthyParked.length) return pick(healthyParked);
-  // Every remaining backend is quarantined (its egress IP has a burned quota
-  // bucket: dialing succeeds but every upstream request 429s — which is how
-  // the serve→report→serve loop of 2026-10-07 kept burning) or unhealthy.
-  // Signal that instead of picking one; the relay falls back to direct egress.
-  return null;
+  const usable = fresh.length ? fresh : healthyParked;
+  if (!usable.length) {
+    // Every remaining backend is quarantined (its egress IP has a burned quota
+    // bucket: dialing succeeds but every upstream request 429s — which is how
+    // the serve→report→serve loop of 2026-10-07 kept burning) or unhealthy.
+    // Signal that instead of picking one; the relay falls back to direct egress.
+    return null;
+  }
+  // Sticky: hold the backend already in use when it is still usable; only a
+  // 429/quarantine/park moves the traffic to the sibling.
+  const held = usable.find((b) => b.id === stickyId);
+  if (held) return held;
+  stickyId = usable[0].id;
+  return usable[0];
 }
 
 /* ---------------- SOCKS5 server (client → pool) ---------------- */
