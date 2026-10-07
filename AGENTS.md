@@ -54,6 +54,10 @@ last-resort tier serves through it — the client gets the upstream's honest
 429 instead of an instant `rep=5` 502 storm. Refuse (rep=5) only when every
 backend's CONNECT itself fails. And a shuffle cannot break a colo-stuck
 shared IP — an `untilDistinct` divergence escalates to exactly ONE renew.
+The report episode-gate must never deadlock recovery: every report re-arms
+the quarantine, so gating the reset on `!wasQuarantined` alone strands the
+pool on the burned IP forever — a report against a backend still sitting on
+its own burned IP must re-fire the reset once MIN_RESET_GAP has elapsed.
 
 ## Before every commit
 

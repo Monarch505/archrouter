@@ -707,11 +707,19 @@ const api = http.createServer((req, res) => {
         const wasQuarantined = isQuarantined(b);
         b.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
         event("quarantine", b.id, `excluded from RR for ${QUARANTINE_SECS}s (limit event)`);
-        // First hit of a quarantine episode only: later reports in the same
-        // episode find the backend already blocked from serving, so a renew
-        // then would burn a slot for nothing.
+        // First hit of a quarantine episode fires the reset. BUT (live
+        // 2026-10-08 02:10) the old gate `!wasQuarantined` deadlocks: every
+        // report re-arms the quarantine, and a client retrying every ~2s
+        // keeps it armed forever — so a reset whose landing stayed on the
+        // burned IP (the colo keeps handing the same one back) is NEVER
+        // retried and auto-rotation dies on the burned IP. Retry rule: the
+        // backend still sits on its own burned IP AND the per-instance
+        // cooldown has elapsed. Each retry is a fresh renew draw;
+        // MIN_RESET_GAP + the renew budget keep it from storming.
+        const stillBurned = !!(b.burnedIp && b.lastIp && b.burnedIp === b.lastIp);
+        const gapOk = Date.now() - b.lastResetAt >= MIN_RESET_GAP;
         let resetStarted = false;
-        if (AUTO_RESET && !wasQuarantined) {
+        if (AUTO_RESET && !b.resetting && (!wasQuarantined || (stillBurned && gapOk))) {
           resetStarted = true;
           coordinatorReset(b.id, "api-limit", { untilDistinct: true, avoidIp: burnedIp, mode: "renew" }).then((r) => {
             if (r.code !== 200 && r.code !== 202) log(`[coordinator] background reset ${b.id}: ${r.code} ${r.msg}`);
@@ -728,7 +736,8 @@ const api = http.createServer((req, res) => {
           const tWasQuarantined = isQuarantined(t);
           t.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
           event("quarantine", t.id, `shares burned IP ${burnedIp} with ${b.id} → also excluded for ${QUARANTINE_SECS}s`);
-          if (AUTO_RESET && !tWasQuarantined) {
+          if (AUTO_RESET && !t.resetting && (!tWasQuarantined
+            || (t.burnedIp && t.lastIp && t.burnedIp === t.lastIp && Date.now() - t.lastResetAt >= MIN_RESET_GAP))) {
             resetStarted = true;
             setTimeout(() => {
               coordinatorReset(t.id, "shared-ip", { untilDistinct: true, avoidIp: burnedIp, mode: "renew" }).then((r) => {

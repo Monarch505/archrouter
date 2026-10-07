@@ -500,6 +500,54 @@ function check(name, cond, extra = "") {
         `via=${viaErr || "ok (LEAK)"} refusedEvt=${refusedEvt} last_serve=${JSON.stringify(stF4b.last_serve)}`);
     }
 
+    // F6: the episode gate must not deadlock auto-rotation (live 2026-10-08
+    // 02:10): every report re-arms the quarantine, and the old gate
+    // (`!wasQuarantined`) then skipped EVERY later reset — a reset whose
+    // landing stayed on the burned IP was never retried, so the pool sat on
+    // the burned IP forever while clients got an endless 429 stream. A
+    // report against a backend still on its burned IP must fire a NEW reset
+    // once the per-instance cooldown has elapsed.
+    {
+      if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined && !i.parked))))
+        throw new Error("F6 setup: backends still quarantined/parked");
+      const curA = (await stNow()).instances.find((i) => i.id === "a").public_ip;
+      // Steer every a-reset landing back onto a's CURRENT IP → every attempt
+      // is rejected as onBurned → a parks still on the burned IP (the stuck
+      // state from the live incident).
+      writeOvr({ a: curA });
+      const rep1 = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+      if (rep1.code !== 202) throw new Error(`F6: report1 got ${rep1.code}`);
+      // Anchor on the same-ip-stuck EVENT, not the parked flag: the park is
+      // immediately re-evaluated by reconcileIpUniqueness and a UNIQUE burned
+      // IP gets unparked within the same reset call (live log: "distinct
+      // egress IP → back in rotation"). The stuck event is the durable proof
+      // that the reset finished WITHOUT leaving the burned IP.
+      const seenF6 = new Set((await stNow()).events.map(evKey));
+      const stuckF6 = await waitFor(async () =>
+        (await stNow()).events.some((e) => !seenF6.has(evKey(e)) && e.type === "same-ip-stuck" && e.instance === "a"), 40000);
+      if (!stuckF6) throw new Error("F6: a's reset never got stuck on the burned IP");
+      // Wait out the per-instance cooldown (min-reset-gap 2s in this suite).
+      if (!(await waitFor(async () => {
+        const a = (await stNow()).instances.find((i) => i.id === "a");
+        return !!(a.lastReset && Date.now() - Date.parse(a.lastReset) >= 2500);
+      }))) throw new Error("F6: a's reset cooldown never elapsed");
+      const base = hookLines().length;
+      const rep2 = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+      const fired = await waitFor(() => Promise.resolve(hookLines().length > base), 8000);
+      check("F6 episode gate: report on still-burned backend re-fires the reset",
+        rep2.code === 202 && fired && !String(rep2.body).includes("reset skipped"),
+        `rep2=${rep2.code} ${rep2.body} fired=${fired}`);
+      // Recover: steer the in-flight reset chain onto an IP that is in NO
+      // burned set (not IP_FRESH.a — that is a's own burned IP now), so the
+      // next attempt is accepted as distinct and a comes back clean.
+      writeOvr({ a: "7.7.8.8" });
+      if (!(await waitFor(async () => {
+        const a = (await stNow()).instances.find((i) => i.id === "a");
+        return !a.parked && !a.quarantined && a.public_ip === "7.7.8.8";
+      }, 40000)))
+        throw new Error("F6 cleanup: a never recovered to a fresh IP");
+    }
+
     // F5: the on-429 account reset must not be throttled by a daily budget —
     // the pool re-registers the WARP account on EVERY limit event. Hermetic:
     // sandbox ARCHROUTER_HOME with a stub sing-box + config and no wgcf, so the
