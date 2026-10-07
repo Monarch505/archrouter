@@ -37,6 +37,8 @@ const hookPathArg = hookLog.replace(/\\/g, "\\\\");
 const ipMapArg = ipMap.replace(/\\/g, "\\\\");
 const refuseFlag = path.join(tmp, "renew-refuse");
 const refuseArg = refuseFlag.replace(/\\/g, "\\\\");
+const ovrPath = path.join(tmp, "override.json");
+const ovrArg = ovrPath.replace(/\\/g, "\\\\");
 const freshArg = JSON.stringify(IP_FRESH);
 // The reset hook is executed by pool.js through a SHELL, so keep every
 // argument free of quotes/braces — cmd.exe mangles JSON blobs in a command line.
@@ -46,9 +48,22 @@ const fs = require("fs");
 const id = process.argv[3];
 const mode = process.argv[7] || "none";
 if (mode === "renew" && fs.existsSync("${refuseArg}")) process.exit(1);
+// Per-attempt landing override (test steering): read + freeze BEFORE the
+// hook line is appended, so a test can rewrite this file the instant the
+// line appears without racing this read.
+let wantA = process.argv[5], wantB = process.argv[6], delayMs = 0;
+try {
+  const o = JSON.parse(fs.readFileSync("${ovrArg}", "utf8"));
+  if (o && typeof o === "object") {
+    if (typeof o.a === "string") wantA = o.a;
+    if (typeof o.b === "string") wantB = o.b;
+    if (typeof o.delayMs === "number") delayMs = o.delayMs;
+  }
+} catch {}
 fs.appendFileSync(process.argv[2], id + ":" + mode + "\\n");
+if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 const m = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
-m[id] = id === "a" ? process.argv[5] : process.argv[6];   // bounce -> new egress IP
+m[id] = id === "a" ? wantA : wantB;   // bounce -> new egress IP (steerable)
 // Atomic replace: the fake backend parses this file FROM ANOTHER PROCESS on
 // every health probe. writeFileSync truncates first, a read in that window
 // sees "" — the suite crashed with SyntaxError mid-CI on exactly that race.
@@ -315,6 +330,103 @@ function check(name, cond, extra = "") {
       clear && repR.code === 202 && alive && postLines === preLines && stR3.instances.find((i) => i.id === "b").quarantined,
       `rep=${repR.code} lines ${preLines}→${postLines} clear=${clear}`);
     fs.rmSync(refuseFlag, { force: true });
+
+    // ---- Regression suite: the 2026-10-07 burn-storm fixes ----
+    const stNow = async () => JSON.parse((await get("/")).body);
+    const evKey = (e) => `${e.time}|${e.type}|${e.instance}|${e.msg}`;
+    const hookLines = () => fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean);
+    const writeOvr = (o) => fs.writeFileSync(ovrPath, JSON.stringify(o));
+    const waitFor = async (fn, ms = 20000) => {
+      const end = Date.now() + ms;
+      for (;;) {
+        let v = false;
+        try { v = await fn(); } catch {}
+        if (v) return true;
+        if (Date.now() > end) return false;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+
+    // F1: a renew that lands back on the shared/burned IP must bounce with
+    // the free shuffle attempts (attempt 2), not park after ONE try.
+    {
+      await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined));
+      const base = hookLines().length;
+      const seen = new Set((await stNow()).events.map(evKey));
+      writeOvr({ a: IP_FRESH.b }); // steer a's renew onto b's current egress IP
+      const rep = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+      const stuck = await waitFor(async () =>
+        (await stNow()).events.some((e) => !seen.has(evKey(e)) && e.type === "same-ip-stuck" && e.instance === "a"));
+      const added = hookLines().slice(base).filter((l) => l.startsWith("a:"));
+      check("F1 renew fallback: burned landing bounces with shuffle attempts",
+        rep.code === 202 && stuck && added.includes("a:renew") && added.includes("a:shuffle"),
+        `code=${rep.code} stuck=${stuck} added=${JSON.stringify(added)}`);
+    }
+
+    // F2: burned memory is shared — b must refuse the IP a reported burned,
+    // even while a's own lastIp is nulled mid-reset (the detection gap).
+    {
+      if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined))))
+        throw new Error("F2 setup: backends still quarantined");
+      writeOvr({ a: "7.7.7.7" });
+      let step1 = null;
+      for (let i = 0; i < 6 && (!step1 || step1.code !== 200); i++) {
+        step1 = await post("/api/report", { event: "restart", instance: "a" });
+        if (step1.code !== 200) await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (!step1 || step1.code !== 200)
+        throw new Error(`F2 setup: a -> 7.7.7.7 got ${step1 && step1.code} ${step1 && step1.body}`);
+      // a's next (burn-report) reset must STAY on 7.7.7.7 with its lastIp
+      // nulled while b verifies: delay it, then steer b onto the same IP.
+      // Exactly ONE report of an episode fires the reset — later reports in
+      // the same episode only refresh the quarantine (that is why re-posting
+      // never helped). So wait out a's min-reset gap first (status exposes
+      // lastReset), then report once and require the hook to start.
+      if (!(await waitFor(async () => {
+        const a = (await stNow()).instances.find((i) => i.id === "a");
+        return !!(a && a.lastReset && Date.now() - Date.parse(a.lastReset) >= 2500);
+      })))
+        throw new Error("F2 setup: a's reset cooldown never elapsed");
+      writeOvr({ a: "7.7.7.7", delayMs: 4000 });
+      const base = hookLines().length;
+      const seen = new Set((await stNow()).events.map(evKey));
+      const repA = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+      if (repA.code !== 202) throw new Error(`F2: report a got ${repA.code}`);
+      if (!(await waitFor(() => Promise.resolve(hookLines().length > base), 8000)))
+        throw new Error("F2: a's delayed reset hook never started");
+      writeOvr({ b: "7.7.7.7" }); // a already froze its own values
+      const repB = await post("/api/report", { event: "freeusagelimit", instance: "b" });
+      if (repB.code !== 202) throw new Error(`F2: report b got ${repB.code}`);
+      if (!(await waitFor(() => Promise.resolve(hookLines().some((l) => l.startsWith("b:"))), 8000)))
+        throw new Error("F2: b's reset hook never started");
+      const stuckB = await waitFor(async () =>
+        (await stNow()).events.some((e) => !seen.has(evKey(e)) && e.type === "same-ip-stuck" && e.instance === "b"));
+      const doneB = (await stNow()).events.some((e) =>
+        !seen.has(evKey(e)) && e.instance === "b" && e.type === "reset" && String(e.msg).startsWith("DONE"));
+      const bLines = hookLines().slice(base).filter((l) => l.startsWith("b:"));
+      check("F2 shared burned memory: b refuses a's burned IP, bounces, parks",
+        stuckB && !doneB && bLines.includes("b:renew") && bLines.includes("b:shuffle"),
+        `stuck=${stuckB} doneB=${doneB} bLines=${JSON.stringify(bLines)}`);
+    }
+
+    // F3: with every warp path burned, the pool must serve nothing from the
+    // burned buckets — traffic falls back to direct egress instead of the
+    // serve→report→serve loop.
+    {
+      if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined))))
+        throw new Error("F3 setup: backends still quarantined");
+      const before = { a: served("a"), b: served("b") };
+      const r1 = await post("/api/report", { event: "freeusagelimit", instance: "a" });
+      const r2 = await post("/api/report", { event: "freeusagelimit", instance: "b" });
+      let viaErr = "";
+      try { await viaPool("opencode.ai", 443); } catch (e) { viaErr = e.message; }
+      const after = { a: served("a"), b: served("b") };
+      const st = await stNow();
+      const bothQ = st.instances.every((i) => i.quarantined);
+      check("F3 all-burned: nothing served from burned buckets (direct egress)",
+        r1.code === 202 && r2.code === 202 && bothQ && after.a === before.a && after.b === before.b,
+        `served a ${before.a}->${after.a} b ${before.b}->${after.b} bothQ=${bothQ} via=${viaErr || "ok"}`);
+    }
   } catch (e) {
     check("no exception", false, e.message);
   } finally {

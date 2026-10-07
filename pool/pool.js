@@ -199,6 +199,7 @@ const backends = backendDefs.map((d) => {
     id, host: hp.host, port: hp.port,
     consecFails: 0, lastOk: 0,
     lastIp: null,
+    burnedIp: null,    // last IP this instance reported burned (shared burned set)
     ipSince: 0,        // when lastIp was first observed (keeper election)
     parked: false,     // shares its egress IP with a sibling → excluded from RR
     parkedAt: 0,
@@ -330,9 +331,11 @@ function pickBackend() {
   // burned one — still a single account on the shared IP, traffic keeps flowing.
   const healthyParked = backends.filter((b) => healthy(b) && b.parked);
   if (healthyParked.length) return pick(healthyParked);
-  // Everything is quarantined: prefer the one whose quarantine expires soonest.
-  const byQuarantine = [...backends].sort((x, y) => x.quarantineUntil - y.quarantineUntil);
-  return pick(byQuarantine);
+  // Every remaining backend is quarantined (its egress IP has a burned quota
+  // bucket: dialing succeeds but every upstream request 429s — which is how
+  // the serve→report→serve loop of 2026-10-07 kept burning) or unhealthy.
+  // Signal that instead of picking one; the relay falls back to direct egress.
+  return null;
 }
 
 /* ---------------- SOCKS5 server (client → pool) ---------------- */
@@ -377,6 +380,7 @@ async function relay(client, host, port) {
   let lastErr = null;
   for (let i = 0; i < backends.length; i++) {
     const b = pickBackend();
+    if (!b) break; // no healthy warp path → direct fallback below
     try {
       const up = await socks5Connect(b.host, b.port, host, port);
       b.consecFails = 0; b.lastOk = Date.now();
@@ -400,7 +404,7 @@ async function relay(client, host, port) {
   try {
     const direct = await directConnect(host, port);
     totals.direct_fallback += 1;
-    event("serve", "direct", `${host}:${port} (fallback #${totals.direct_fallback}, warp down)`);
+    event("serve", "direct", `${host}:${port} (fallback #${totals.direct_fallback}, no usable warp path)`);
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
     client.pipe(direct); direct.pipe(client);
     const done = () => { try { client.destroy(); } catch {} try { direct.destroy(); } catch {} };
@@ -509,8 +513,12 @@ async function coordinatorReset(id, source, opts = {}) {
   const avoidIp = SAME_IP_GUARD ? (opts.avoidIp || null) : null;
   const mode = opts.mode === "renew" ? "renew" : "shuffle";
   // mode=renew re-registers the WARP account — expensive, burns a Cloudflare
-  // slot, rate-limited: NEVER loop it more than once per call (one attempt).
-  const maxAttempts = mode === "renew" ? 1 : (untilDistinct ? DISTINCT_RETRIES : 1);
+  // slot, rate-limited: exactly ONE renew per call. If that renew lands back
+  // on a burned/shared IP, fall through to the free shuffle attempts instead
+  // of parking the backend for minutes on a single try (2026-10-07 storm:
+  // one renew, one IP check, then stuck — burn repeated until neither
+  // backend had quota left, while serves kept flowing in).
+  const maxAttempts = untilDistinct ? DISTINCT_RETRIES : 1;
   b.resetting = true;
   const ipBefore = b.lastIp;
   // Drop the stale IP while the tunnel is down: a half-dead backend must not
@@ -521,7 +529,8 @@ async function coordinatorReset(id, source, opts = {}) {
   if (mode === "renew") totals.renewals += 1; // attempt-counted: a refused register still costs a slot
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const hook = await runHook(id, mode);
+      // Attempts after the first are free shuffles — never re-renew mid-retry.
+      const hook = await runHook(id, mode === "renew" && attempt > 1 ? "shuffle" : mode);
       if (!hook.ok) {
         event("error", id, `hook failed: ${hook.msg}`);
         return { code: 502, msg: hook.msg };
@@ -534,7 +543,12 @@ async function coordinatorReset(id, source, opts = {}) {
         // event must never hand us back the IP that just burned. If the fresh
         // handshake lands on a forbidden IP, retry instead of accepting it.
         const partner = conflictPartner(b);
-        const onBurned = avoidIp && v.ip === avoidIp;
+        // Burned memory is shared across instances: while a sibling's own
+        // lastIp is nulled mid-reset (its report just set its fresh landing
+        // as the burned one), this backend's verify must still refuse that
+        // IP — otherwise both backends bounce onto the same burned bucket.
+        const burnedNow = new Set([avoidIp, ...backends.map((x) => x.burnedIp)].filter(Boolean));
+        const onBurned = !!(v.ip && burnedNow.has(v.ip));
         if ((partner || onBurned) && untilDistinct) {
           totals.conflict_resets += 1;
           event("same-ip", id, onBurned
@@ -626,6 +640,7 @@ const api = http.createServer((req, res) => {
         // background for a fresh IP. Respond immediately so the router's
         // next retry attempt already lands on the healthy backend.
         const burnedIp = b.lastIp;
+        if (burnedIp) b.burnedIp = burnedIp; // remembered even while the reset nulls lastIp
         const wasQuarantined = isQuarantined(b);
         b.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
         event("quarantine", b.id, `excluded from RR for ${QUARANTINE_SECS}s (limit event)`);
@@ -646,6 +661,7 @@ const api = http.createServer((req, res) => {
         const twins = backends.filter((x) => x !== b && burnedIp && x.lastIp === burnedIp);
         for (const t of twins) {
           totals.shared_ip_quarantines += 1;
+          if (burnedIp) t.burnedIp = burnedIp;
           const tWasQuarantined = isQuarantined(t);
           t.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
           event("quarantine", t.id, `shares burned IP ${burnedIp} with ${b.id} → also excluded for ${QUARANTINE_SECS}s`);
