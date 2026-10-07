@@ -36,6 +36,14 @@ function writeRequest(req, body) {
   body.pipe(req);
 }
 
+const SOCK_REP = new Map([
+  [0x00, "succeeded"], [0x01, "general SOCKS server failure"],
+  [0x02, "connection not allowed by ruleset"], [0x03, "network unreachable"],
+  [0x04, "host unreachable"], [0x05, "connection refused"],
+  [0x06, "TTL expired"], [0x07, "command not supported"],
+  [0x08, "address type not supported"],
+]);
+
 function doRequest({ target, method, headers, body, proxy, proxyStyle = "tunnel", timeoutMs = 120000, signal }) {
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(Object.assign(new Error("aborted"), { aborted: true }));
@@ -103,7 +111,8 @@ function doRequest({ target, method, headers, body, proxy, proxyStyle = "tunnel"
                 Buffer.from([(target.port >> 8) & 0xff, target.port & 0xff]),
               ]));
             } else if (stage === 1 && buf.length >= 10) {
-              if (buf[1] !== 0x00) return fail(Object.assign(new Error(`socks5 CONNECT failed rep=${buf[1]}`), { statusCode: buf[1] }));
+              const rep = buf[1];
+              if (rep !== 0x00) return fail(Object.assign(new Error(`socks5 CONNECT failed; rep=${rep} ${SOCK_REP.get(rep) || "unknown"}`), { rep, statusCode: rep, retryable: true }));
               sock.removeAllListeners("data");
               sock.removeListener("error", fail);
               if (target.protocol === "https:") {

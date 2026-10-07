@@ -139,7 +139,7 @@ function socks5Connect(proxyHost, proxyPort, dstHost, dstPort, timeoutMs = 10000
             sock.write(req);
           } else if (stage === 1 && buf.length >= 10) {
             const rep = buf[1];
-            if (rep !== 0x00) return done(Object.assign(new Error(`socks5 CONNECT failed; rep=${rep} ${SOCK_REP.get(rep) || "unknown"}`), { rep }));
+            if (rep !== 0x00) return done(Object.assign(new Error(`socks5 CONNECT failed; rep=${rep} ${SOCK_REP.get(rep) || "unknown"}`), { rep, retryable: true }));
             sock.removeAllListeners("data");
             done(null, sock);
           }
