@@ -198,6 +198,39 @@ const QUARANTINE_SECS = Number(args["quarantine-secs"] || 300);
 // different accounts (per-colo assignment, not per-account). Keep the two
 // backends on distinct egress IPs at all times.
 const SAME_IP_GUARD = String(args["same-ip-guard"] ?? "1") !== "0";
+// Quota BUCKET, not just exact address. Cloudflare hands WARP IPs out per colo
+// and the limiter may key on something coarser than a single address, so a
+// backend that lands "next door" to a burned IP (.130 after .133 burned) can
+// be standing in the same dead bucket. Burned memory is therefore compared per
+// prefix. Default /24 (fail-closed: over-quarantining costs availability for
+// one window, under-quarantining costs a burn storm); 0 restores exact-IP.
+const BUCKET_BITS = Math.max(0, Math.min(32, Number(args["bucket-bits"] ?? 24)));
+
+// IPv4 prefix of an address at BUCKET_BITS. Non-IPv4/IPv6 input is returned
+// unchanged so an unexpected probe result degrades to exact matching instead
+// of lumping every address into one bucket.
+function ipPrefix(ip) {
+  if (!ip || BUCKET_BITS >= 32) return ip || null;
+  if (BUCKET_BITS <= 0) return ip;
+  const p = String(ip).split(".");
+  if (p.length !== 4) return ip;
+  let out = "";
+  for (let i = 0; i < 4; i++) {
+    const bits = Math.max(0, Math.min(8, BUCKET_BITS - i * 8));
+    const v = Number(p[i]) & (bits === 0 ? 0 : (0xff << (8 - bits)) & 0xff);
+    out += (i ? "." : "") + v;
+  }
+  return out;
+}
+
+// Do these two egress addresses share a quota bucket? BUCKET_BITS 0 → exact
+// address equality (the pre-2026-10-09 behaviour).
+function sameBurnBucket(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (BUCKET_BITS <= 0) return false;
+  return ipPrefix(a) === ipPrefix(b);
+}
 const DISTINCT_RETRIES = Math.max(1, Number(args["distinct-retries"] || 5));
 const DISTINCT_RETRY_DELAY = Math.max(0, Number(args["distinct-retry-delay"] || 12)) * 1000;
 const PARK_RETRY_DELAY = Math.max(5, Number(args["park-retry-delay"] || 180)) * 1000;
@@ -264,6 +297,19 @@ function invariantStatus() {
   };
 }
 
+// Is this egress address inside ANY backend's burned bucket? Shared memory,
+// same judgement as the report/reset path (prefix, not exact address). A
+// parked backend sitting on a burned bucket is NOT recovered — un-parking it
+// put a quota-dead IP straight back into rotation and the retry loop then
+// churned park/unpark on it forever (2026-10-09).
+function burnedBucketHit(ip) {
+  if (!ip) return null;
+  for (const x of backends) {
+    if (x.burnedIp && sameBurnBucket(ip, x.burnedIp)) return x.burnedIp;
+  }
+  return null;
+}
+
 function reconcileIpUniqueness(source) {
   if (!SAME_IP_GUARD) return;
   const groups = new Map();
@@ -277,6 +323,12 @@ function reconcileIpUniqueness(source) {
     if (group.length < 2) {
       for (const b of group) {
         if (b.parked) {
+          const burned = burnedBucketHit(b.lastIp);
+          if (burned) {
+            const wait = Math.max(1, Math.round((b.retryAt - Date.now()) / 1000));
+            event("same-ip", b.id, `still inside burned bucket ${ipPrefix(b.lastIp)} (burned ${burned}) → stays parked, retry in ${wait}s`);
+            continue;
+          }
           b.parked = false; b.parkedAt = 0; b.retryAt = 0;
           totals.unpark_count += 1;
           event("same-ip", b.id, `distinct egress IP ${ip} → back in rotation (source=${source})`);
@@ -609,8 +661,12 @@ async function coordinatorReset(id, source, opts = {}) {
         // lastIp is nulled mid-reset (its report just set its fresh landing
         // as the burned one), this backend's verify must still refuse that
         // IP — otherwise both backends bounce onto the same burned bucket.
-        const burnedNow = new Set([avoidIp, ...backends.map((x) => x.burnedIp)].filter(Boolean));
-        const onBurned = !!(v.ip && burnedNow.has(v.ip));
+        // Burned memory is shared across instances AND judged per bucket: a
+        // landing next door to a burned IP is just as dead a bucket as landing
+        // on it, and accepting it is what kept a reset "successful" while the
+        // backend sat on a quota that was already gone (2026-10-09).
+        const burnedNow = [avoidIp, ...backends.map((x) => x.burnedIp)].filter(Boolean);
+        const onBurned = !!(v.ip && burnedNow.some((x) => sameBurnBucket(v.ip, x)));
         if ((partner || onBurned) && untilDistinct) {
           totals.conflict_resets += 1;
           event("same-ip", id, onBurned
@@ -682,6 +738,7 @@ const api = http.createServer((req, res) => {
       ip_conflict: hasIpConflict(),
       parked: backends.filter((b) => b.parked).map((b) => b.id),
       same_ip_guard: SAME_IP_GUARD,
+      bucket_bits: BUCKET_BITS,
       ...invariantStatus(),
       smart_reset: { ...totals, success_rate: totals.total_resets ? `${Math.round((100 * totals.success_count) / totals.total_resets)}%` : "n/a" },
       resetting: backends.some((b) => b.resetting), events,
@@ -716,7 +773,7 @@ const api = http.createServer((req, res) => {
         // backend still sits on its own burned IP AND the per-instance
         // cooldown has elapsed. Each retry is a fresh renew draw;
         // MIN_RESET_GAP + the renew budget keep it from storming.
-        const stillBurned = !!(b.burnedIp && b.lastIp && b.burnedIp === b.lastIp);
+        const stillBurned = !!(b.lastIp && sameBurnBucket(b.lastIp, b.burnedIp));
         const gapOk = Date.now() - b.lastResetAt >= MIN_RESET_GAP;
         let resetStarted = false;
         if (AUTO_RESET && !b.resetting && (!wasQuarantined || (stillBurned && gapOk))) {
@@ -729,15 +786,15 @@ const api = http.createServer((req, res) => {
         // would 429 on the very next request, so failing over to it is
         // useless. Quarantine + reset it too (staggered: this one is already
         // in flight, the sibling starts after a short delay).
-        const twins = backends.filter((x) => x !== b && burnedIp && x.lastIp === burnedIp);
+        const twins = backends.filter((x) => x !== b && burnedIp && sameBurnBucket(x.lastIp, burnedIp));
         for (const t of twins) {
           totals.shared_ip_quarantines += 1;
           if (burnedIp) t.burnedIp = burnedIp;
           const tWasQuarantined = isQuarantined(t);
           t.quarantineUntil = Date.now() + QUARANTINE_SECS * 1000;
-          event("quarantine", t.id, `shares burned IP ${burnedIp} with ${b.id} → also excluded for ${QUARANTINE_SECS}s`);
+          event("quarantine", t.id, `shares burned bucket ${ipPrefix(burnedIp)} with ${b.id} (egress ${t.lastIp}) → also excluded for ${QUARANTINE_SECS}s`);
           if (AUTO_RESET && !t.resetting && (!tWasQuarantined
-            || (t.burnedIp && t.lastIp && t.burnedIp === t.lastIp && Date.now() - t.lastResetAt >= MIN_RESET_GAP))) {
+            || (t.lastIp && sameBurnBucket(t.lastIp, t.burnedIp) && Date.now() - t.lastResetAt >= MIN_RESET_GAP))) {
             resetStarted = true;
             setTimeout(() => {
               coordinatorReset(t.id, "shared-ip", { untilDistinct: true, avoidIp: burnedIp, mode: "renew" }).then((r) => {

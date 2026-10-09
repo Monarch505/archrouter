@@ -508,8 +508,14 @@ function check(name, cond, extra = "") {
     // report against a backend still on its burned IP must fire a NEW reset
     // once the per-instance cooldown has elapsed.
     {
-      if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined && !i.parked))))
-        throw new Error("F6 setup: backends still quarantined/parked");
+      // Only the quarantine has to clear here. Both fake backends in this suite
+      // deliberately report the SAME egress IP ("0"), so the same-ip guard keeps
+      // one of them parked for the whole run — demanding an un-parked pair would
+      // make F6 unreachable (it failed exactly that way once). Parking is
+      // orthogonal to this scenario: the reset still runs, still has to escape
+      // the burned landing.
+      if (!(await waitFor(async () => (await stNow()).instances.every((i) => !i.quarantined))))
+        throw new Error("F6 setup: backends still quarantined");
       const curA = (await stNow()).instances.find((i) => i.id === "a").public_ip;
       // Steer every a-reset landing back onto a's CURRENT IP → every attempt
       // is rejected as onBurned → a parks still on the burned IP (the stuck
