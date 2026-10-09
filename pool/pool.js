@@ -342,6 +342,21 @@ function reconcileIpUniqueness(source) {
     const keeper = ordered[0];
     for (const b of group) {
       if (b === keeper) {
+        // Keeping a SHARED ip is not evidence of life: when the whole group
+        // sits in one quota-dead bucket, "keeper" only means which of the two
+        // dead backends gets picked first. Unparking it there put a burned IP
+        // straight back into rotation (live 2026-10-09 08:31, event "keeps
+        // egress IP 104.28.215.130 ... back in rotation" seconds after the
+        // park). Parked means parked until the landing leaves the bucket.
+        const burned = burnedBucketHit(b.lastIp);
+        if (burned) {
+          if (!b.parked) {
+            b.parked = true; b.parkedAt = Date.now(); b.retryAt = Date.now() + PARK_RETRY_DELAY;
+            totals.park_count += 1;
+            event("same-ip", b.id, `keeps egress IP ${ip} but it sits in burned bucket ${ipPrefix(ip)} (burned ${burned}) → stays parked (source=${source})`);
+          }
+          continue;
+        }
         if (b.parked) {
           b.parked = false; b.parkedAt = 0; b.retryAt = 0;
           totals.unpark_count += 1;

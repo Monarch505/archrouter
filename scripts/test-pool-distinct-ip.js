@@ -301,6 +301,36 @@ fs.writeFileSync(${JSON.stringify(ip2)}, JSON.stringify(m));
     check("backend that cannot escape the burned bucket stays parked (never re-served on it)",
       a9.parked === true && String(a9.public_ip).startsWith("4.4.4.") && !st9.serving.includes("a"),
       `parked=${a9.parked} ip=${a9.public_ip} serving=${JSON.stringify(st9.serving)} hookAttempts=${hookCount() - parkBase}`);
+
+    // 10) the SHARED-IP keeper path (live 2026-10-09 08:31): both accounts were
+    //     on ONE address when the limit hit, so reconcileIpUniqueness took the
+    //     group/keeper branch, not the parked-retry branch — and the keeper was
+    //     un-parked onto the very bucket that had just burned. A keeper inside a
+    //     burned bucket must stay parked too.
+    fs.writeFileSync(pl2, JSON.stringify({ a: new Array(12).fill("9.9.9.9"), b: new Array(12).fill("9.9.9.9") }));
+    write2({ a: "9.9.9.9", b: "9.9.9.9" });
+    await wait2((s) => s.instances.every((i) => i.public_ip === "9.9.9.9"), 30);
+    const shared0 = (JSON.parse((await getAt(B2.status, "/")).body)).events.length;
+    const keeperBase = hookCount();
+    const rep6 = await postAt(B2.status, "/api/report", { event: "freeusagelimit", instance: "b" });
+    check("shared-IP burn report → 202", rep6.code === 202, rep6.body);
+    const st10 = await wait2((s) => s.instances.find((i) => i.id === "a").parked === true
+      && hookCount() >= keeperBase + 2, 45);
+    const ev10 = JSON.parse((await getAt(B2.status, "/")).body).events.slice(shared0);
+    const a10 = st10.instances.find((i) => i.id === "a");
+    // Assert on EVERY backend still sitting in the burned bucket, not on `a`:
+    // whichever of the two holds the address longest is the keeper, and the
+    // keeper is exactly the one the old code un-parked. Naming one backend let
+    // this check pass against the unfixed pool.
+    const inBurned = st10.instances.filter((i) => String(i.public_ip).startsWith("9.9.9."));
+    const unparks = ev10.filter((e) => /back in rotation/.test(String(e.msg))
+      && inBurned.some((i) => i.id === e.instance));
+    check("shared-IP keeper inside the burned bucket is not un-parked onto it",
+      inBurned.length === 2 && inBurned.every((i) => i.parked === true)
+      && inBurned.every((i) => !st10.serving.includes(i.id)) && unparks.length === 0,
+      `parked=${JSON.stringify(inBurned.map((i) => [i.id, i.parked, st10.serving.includes(i.id)]))} `
+      + `hookAttempts=${hookCount() - keeperBase} `
+      + `unparkEvt=${unparks.map((e) => `${e.instance}:${e.msg}`).join(" | ")}`);
   } catch (e) {
     check("no exception (bucket scenarios)", false, e.message);
   } finally {
